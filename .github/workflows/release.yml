@@ -1,0 +1,199 @@
+name: Scout Bee release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out immutable revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Configure Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Configure Go from go.mod
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Install and verify
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm verify
+
+      - name: Build portable Windows executable
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw VERSION).Trim()
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $env:CGO_ENABLED = '0'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags "-s -w -X main.scoutVersion=$version" `
+            -o "dist/scout-bee-$version-windows-amd64.exe" .
+
+      - name: Authenticode-sign and timestamp Windows executable
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD)) {
+            throw 'Windows signing secrets are required; unsigned release packages are forbidden.'
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'scout-bee-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes(
+              $certificatePath,
+              [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE_BASE64)
+            )
+            $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+              -Filter signtool.exe -Recurse |
+              Where-Object FullName -Match '\\x64\\signtool\.exe$' |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+            if (-not $signTool) { throw 'signtool.exe was not found on the release runner.' }
+            $artifact = Get-ChildItem dist\scout-bee-*-windows-amd64.exe -File -ErrorAction Stop
+            & $signTool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+              /f $certificatePath /p $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD $artifact.FullName
+            if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed.' }
+            & $signTool verify /pa /all $artifact.FullName
+            if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed.' }
+          } finally {
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload signed Windows package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scout-bee-windows-amd64
+          path: dist/scout-bee-*-windows-amd64.exe
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out immutable revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Configure Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Configure Go from go.mod
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Install and verify
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm verify
+
+      - name: Build Linux archive
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          mkdir -p dist/linux-package
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w -X main.scoutVersion=$version" \
+            -o dist/linux-package/scout-bee .
+          cp packaging/RELEASE-README.txt dist/linux-package/README.txt
+          tar --create --gzip --file "dist/scout-bee-${version}-linux-amd64.tar.gz" \
+            --directory dist/linux-package scout-bee README.txt
+          pnpm release:supply-chain
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scout-bee-linux-amd64
+          path: dist/scout-bee-*-linux-amd64.tar.gz
+          if-no-files-found: error
+
+      - name: Upload Scout supply-chain metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scout-bee-supply-chain
+          path: |
+            dist/scout-bee-sbom.cdx.json
+            dist/scout-bee-license-report.md
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out immutable revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Configure Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Download exact packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: scout-bee-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify version and build release manifest
+        run: |
+          node scripts/verify-version.mjs
+          node scripts/build-release-manifest.mjs
+          (cd dist && sha256sum scout-bee-* > SHA256SUMS)
+
+      - name: Attest Scout packages and release metadata
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        with:
+          subject-path: |
+            dist/scout-bee-*-windows-amd64.exe
+            dist/scout-bee-*-linux-amd64.tar.gz
+            dist/scout-bee-release-manifest.json
+            dist/scout-bee-sbom.cdx.json
+            dist/scout-bee-license-report.md
+            dist/SHA256SUMS
+
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          if [[ "$version" == *-* ]]; then
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag --prerelease --generate-notes \
+              --title "Scout Bee $version"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag --generate-notes \
+              --title "Scout Bee $version"
+          fi

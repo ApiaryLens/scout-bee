@@ -1,0 +1,208 @@
+package main
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"net"
+	"net/url"
+	"path"
+	"regexp"
+	"strings"
+	"time"
+)
+
+// Scout and ApiaryLens are independently versioned. Release builds override
+// scoutVersion from VERSION with -ldflags; supportedProductVersion identifies the
+// exact compatibility baseline consumed by this transitional executor.
+var scoutVersion = "0.1.0-preview.1"
+
+const supportedProductVersion = "0.1.0-preview.1"
+
+type release struct {
+	Version        string `json:"version"`
+	Channel        string `json:"channel"`
+	ManifestURL    string `json:"manifestUrl"`
+	ManifestSha256 string `json:"manifestSha256"`
+}
+
+type cloudflare struct {
+	AccountReference string `json:"accountReference"`
+	WorkerName       string `json:"workerName"`
+	D1DatabaseName   string `json:"d1DatabaseName"`
+	R2BucketName     string `json:"r2BucketName"`
+	CustomDomain     string `json:"customDomain,omitempty"`
+	CostProfile      string `json:"costProfile"`
+}
+
+type compose struct {
+	Host             string `json:"host"`
+	Port             int    `json:"port"`
+	User             string `json:"user"`
+	TargetDirectory  string `json:"targetDirectory"`
+	ProjectName      string `json:"projectName"`
+	PublicURL        string `json:"publicUrl"`
+	SSHHostKeySha256 string `json:"sshHostKeySha256"`
+	BackupRetention  int    `json:"backupRetention"`
+}
+
+type plan struct {
+	SchemaVersion       int         `json:"schemaVersion"`
+	PlanID              string      `json:"planId"`
+	CreatedAt           string      `json:"createdAt"`
+	Release             release     `json:"release"`
+	Operation           string      `json:"operation"`
+	KeepDataOnUninstall bool        `json:"keepDataOnUninstall"`
+	Target              string      `json:"target"`
+	Cloudflare          *cloudflare `json:"cloudflare,omitempty"`
+	Compose             *compose    `json:"compose,omitempty"`
+}
+
+type request struct {
+	Plan    plan              `json:"plan"`
+	Mode    string            `json:"mode"`
+	Secrets map[string]string `json:"secrets,omitempty"`
+}
+
+type phase struct {
+	Name   string `json:"name"`
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type releaseManifest struct {
+	Product        string             `json:"product"`
+	ProductVersion string             `json:"productVersion"`
+	Channel        string             `json:"channel"`
+	SourceCommit   string             `json:"sourceCommit"`
+	BuildTime      string             `json:"buildTime"`
+	Contracts      manifestContracts  `json:"contracts"`
+	Artifacts      []manifestArtifact `json:"artifacts"`
+}
+
+type manifestContracts struct {
+	APIVersion        string `json:"api"`
+	Sync              int    `json:"sync"`
+	DatabaseMigration string `json:"databaseMigration"`
+	DeploymentPlan    int    `json:"deploymentPlan"`
+}
+
+type manifestArtifact struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Target string `json:"target"`
+	URL    string `json:"url"`
+	Sha256 string `json:"sha256"`
+	Bytes  int64  `json:"bytes"`
+}
+
+var (
+	resourceName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
+	accountID    = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+	planID       = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
+	remotePath   = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+	sshName      = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+)
+
+func validate(p plan) error {
+	if p.SchemaVersion != 1 {
+		return errors.New("unsupported deployment plan version")
+	}
+	if !planID.MatchString(p.PlanID) || p.Release.Version == "" || !validSha256(p.Release.ManifestSha256) {
+		return errors.New("the release identity is incomplete")
+	}
+	if parsed, err := time.Parse(time.RFC3339, p.CreatedAt); err != nil || time.Since(parsed) > 24*time.Hour || time.Until(parsed) > 5*time.Minute {
+		return errors.New("the deployment plan creation time is invalid or stale")
+	}
+	if !safeHTTPSURL(p.Release.ManifestURL) {
+		return errors.New("the release manifest must use HTTPS")
+	}
+	if p.Release.Channel != "preview" && p.Release.Channel != "release-candidate" && p.Release.Channel != "stable" {
+		return errors.New("only preview, release-candidate, or stable releases may be applied")
+	}
+	allowedOperations := map[string]bool{"install": true, "update": true, "backup": true, "restore": true, "export": true, "uninstall": true}
+	if !allowedOperations[p.Operation] {
+		return errors.New("the requested deployment operation is unsupported")
+	}
+	raw, _ := json.Marshal(p)
+	lower := strings.ToLower(string(raw))
+	for _, word := range []string{"password", "apitoken", "privatekey", "secret"} {
+		if strings.Contains(lower, word) {
+			return errors.New("secret-looking fields are not allowed in a deployment plan")
+		}
+	}
+	switch p.Target {
+	case "cloudflare":
+		if p.Cloudflare == nil || p.Compose != nil {
+			return errors.New("exactly one Cloudflare target is required")
+		}
+		if !accountID.MatchString(p.Cloudflare.AccountReference) || !resourceName.MatchString(p.Cloudflare.WorkerName) || !strings.HasPrefix(p.Cloudflare.WorkerName, "apiarylens-") ||
+			!resourceName.MatchString(p.Cloudflare.D1DatabaseName) || !resourceName.MatchString(p.Cloudflare.R2BucketName) {
+			return errors.New("a 32-character Cloudflare account ID and safe lowercase resource names are required; the Worker must begin with apiarylens-")
+		}
+		if p.Cloudflare.CostProfile != "family-free-guarded" {
+			return errors.New("the Cloudflare family profile requires guarded cost limits")
+		}
+		if p.Cloudflare.CustomDomain != "" && !safeHTTPSURL(p.Cloudflare.CustomDomain) {
+			return errors.New("the Cloudflare custom domain must be a complete HTTPS address")
+		}
+	case "compose-ssh":
+		if p.Compose == nil || p.Cloudflare != nil {
+			return errors.New("exactly one Compose target is required")
+		}
+		if !sshName.MatchString(p.Compose.Host) || !sshName.MatchString(p.Compose.User) || !resourceName.MatchString(p.Compose.ProjectName) {
+			return errors.New("the SSH host, user, or project name contains unsupported characters")
+		}
+		if p.Compose.Port < 1 || p.Compose.Port > 65535 ||
+			!remotePath.MatchString(p.Compose.TargetDirectory) || strings.Contains(p.Compose.TargetDirectory, "..") ||
+			p.Compose.TargetDirectory == "/" || path.Clean(p.Compose.TargetDirectory) != p.Compose.TargetDirectory {
+			return errors.New("the remote port or install folder is unsafe")
+		}
+		if !composeHTTPSURL(p.Compose.PublicURL) {
+			return errors.New("a network Compose deployment requires HTTPS on a resolvable hostname, not a raw IP address")
+		}
+		if !strings.HasPrefix(p.Compose.SSHHostKeySha256, "SHA256:") {
+			return errors.New("a verified SSH host key is required")
+		}
+	default:
+		return errors.New("the deployment target is unsupported")
+	}
+	return nil
+}
+
+func safeHTTPSURL(value string) bool {
+	u, err := url.Parse(value)
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil
+}
+
+func composeHTTPSURL(value string) bool {
+	u, err := url.Parse(value)
+	return err == nil && safeHTTPSURL(value) && net.ParseIP(u.Hostname()) == nil
+}
+
+func validSha256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func loopbackHTTPURL(value string) bool {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "http" || u.User != nil {
+		return false
+	}
+	host, _, _ := net.SplitHostPort(u.Host)
+	return net.ParseIP(host).IsLoopback()
+}
+
+func redact(value string, secrets map[string]string) string {
+	result := value
+	for _, secret := range secrets {
+		if secret != "" {
+			result = strings.ReplaceAll(result, secret, "[REDACTED]")
+		}
+	}
+	return result
+}

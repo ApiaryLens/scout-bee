@@ -1,0 +1,41 @@
+{
+  "name": "@apiarylens/scout-bee",
+  "version": "0.1.0-preview.1",
+  "private": true,
+  "type": "module",
+  "description": "ApiaryLens installer, updater, recovery tool, and deployment manager",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build:ui": "tsc -p tsconfig.json --noEmit && vite build",
+    "build": "pnpm build:ui && node scripts/build-scout.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:go": "pnpm build:ui && go test ./...",
+    "version:check": "node scripts/verify-version.mjs",
+    "release:manifest": "node scripts/build-release-manifest.mjs",
+    "release:supply-chain": "node scripts/build-supply-chain.mjs",
+    "security:secrets": "node scripts/scan-secrets.mjs",
+    "verify": "pnpm version:check && pnpm format:check && pnpm lint && pnpm test && pnpm test:go && pnpm security:secrets"
+  },
+  "dependencies": {
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "prettier": "3.9.5",
+    "typescript": "7.0.2",
+    "vite": "8.1.4",
+    "vitest": "4.1.10"
+  }
+}
