@@ -16,14 +16,21 @@ them without copying or deploying product source.
 
 ## End-user packages
 
-End users should install Scout Bee from a signed GitHub Release package, not from a
-source clone. The intended release formats are:
+End users should install Scout Bee from a verified GitHub Release package, not from
+a source clone. The intended release formats are:
 
 - one portable Windows executable; and
 - one Linux archive containing a single executable and a concise README.
 
 The Windows package does not require Go, Node.js, WSL, or a Linux shell. Source
 dependencies below are for contributors only.
+
+Stable and RC Windows releases are Authenticode-signed and fail closed if signing
+material is unavailable. During Preview only, a maintainer may make an explicit
+per-release exception. Such a file includes `-UNSIGNED-PREVIEW.exe` in its name and
+is called out in the release warning and manifest. Verify its SHA-256 and GitHub
+artifact attestation before testing; those controls do not make it
+Authenticode-signed.
 
 Stable is the default product channel. Preview and release-candidate products appear
 only after explicit selection under **Advanced release channel**. Verified product
@@ -42,10 +49,12 @@ The current Windows lifecycle plan target is `windows-client` with architecture
 `x64`. Scout selects the separately pinned `windows-package.json`, Setup executable,
 `RELEASES` metadata, and NuGet package from the exact ApiaryLens product release. It
 verifies every size and SHA-256 plus the manifest-declared Authenticode subject and
-thumbprint before execution. Install, update, repair, rollback, and keep-data
-uninstall are supported by this adapter. Rollback is cache-only; permanent data
-removal requires a separate explicit confirmation. Windows backup, restore, and
-advanced export remain fail-closed until their dedicated implementations land.
+thumbprint before execution. Install, update, repair, rollback, backup, restore, and
+keep-data uninstall are supported by this adapter. Backup and restore paths are
+runtime-only inputs passed to the exact signed installed client through protected
+request and evidence files; they are never persisted in plans, state, logs, or
+diagnostics. Rollback is cache-only, permanent data removal requires a separate
+explicit confirmation, and advanced export remains fail-closed.
 
 ## Contributor build
 

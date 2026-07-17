@@ -1,16 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +55,32 @@ type windowsSmokeEvidence struct {
 	SandboxedRenderer           bool     `json:"sandboxedRenderer"`
 	BridgeKeys                  []string `json:"bridgeKeys"`
 	ControlTokenExposed         bool     `json:"controlTokenExposedInRenderer"`
+}
+
+type windowsHeadlessRequest struct {
+	SchemaVersion int                     `json:"schemaVersion"`
+	Operation     string                  `json:"operation"`
+	ArchivePath   string                  `json:"archivePath"`
+	Expected      windowsHeadlessIdentity `json:"expected"`
+}
+
+type windowsHeadlessIdentity struct {
+	ProductVersion    string `json:"productVersion"`
+	DatabaseMigration string `json:"databaseMigration"`
+}
+
+type windowsHeadlessEvidence struct {
+	SchemaVersion          int    `json:"schemaVersion"`
+	Operation              string `json:"operation"`
+	Status                 string `json:"status"`
+	ProductVersion         string `json:"productVersion"`
+	DatabaseMigration      string `json:"databaseMigration"`
+	Files                  *int   `json:"files,omitempty"`
+	SourceCreatedAt        string `json:"sourceCreatedAt,omitempty"`
+	RecoveryBackupVerified *bool  `json:"recoveryBackupVerified,omitempty"`
+	RollbackPerformed      *bool  `json:"rollbackPerformed,omitempty"`
+	RollbackVerified       *bool  `json:"rollbackVerified,omitempty"`
+	ErrorCode              string `json:"errorCode,omitempty"`
 }
 
 func (nativeWindowsLifecycle) Supported() bool { return runtime.GOOS == "windows" }
@@ -233,9 +261,20 @@ func (a *windowsClientAdapter) system() windowsLifecycleSystem {
 
 func (a *windowsClientAdapter) preflight(_ context.Context, input request) ([]phase, error) {
 	phases := []phase{pass("Validate Windows client lifecycle plan", "The plan selects the current-user x64 Windows client and contains no credentials or local user paths.")}
-	if input.Plan.Operation == "backup" || input.Plan.Operation == "restore" || input.Plan.Operation == "export" {
-		err := fmt.Errorf("the Windows client %s operation is not implemented; Scout will not run Setup for this request", input.Plan.Operation)
+	if input.Plan.Operation == "export" {
+		err := errors.New("the Windows client export operation is not implemented; Scout will not run Setup for this request")
 		return append(phases, failed("Verify Windows lifecycle operation", err)), err
+	}
+	allowed := map[string]bool{"install": true, "update": true, "repair": true, "rollback": true, "backup": true, "restore": true, "uninstall": true}
+	if !allowed[input.Plan.Operation] {
+		err := errors.New("the Windows client lifecycle operation is unsupported")
+		return append(phases, failed("Verify Windows lifecycle operation", err)), err
+	}
+	if (input.Plan.Operation == "backup" || input.Plan.Operation == "restore") && input.Mode != "dry-run" {
+		if _, err := validateRuntimeArchivePath(input.Secrets["windowsArchivePath"], input.Plan.Operation); err != nil {
+			return append(phases, failed("Validate runtime backup location", err)), err
+		}
+		phases = append(phases, pass("Validate runtime backup location", "The runtime-only archive location is absolute and was not added to the plan, state, logs, or diagnostics."))
 	}
 	if input.Plan.Operation == "uninstall" && !input.Plan.KeepDataOnUninstall {
 		phases = append(phases, pass("Plan explicit permanent data removal", "The plan identifies application, database, original media, backups, logs, and protected credentials for permanent removal. No data has been deleted."))
@@ -271,7 +310,7 @@ func (a *windowsClientAdapter) apply(ctx context.Context, input request, manifes
 	}
 	state, stateErr := stateStore.load()
 	if input.Plan.Operation != "install" && input.Plan.Operation != "uninstall" && (stateErr != nil || !state.Installed) {
-		err = errors.New("repair, update, and rollback require a Scout-managed installed Windows client")
+		err = errors.New("the requested lifecycle operation requires a Scout-managed installed Windows client")
 		return append(phases, failed("Verify installed Windows client state", err)), err
 	}
 
@@ -281,6 +320,13 @@ func (a *windowsClientAdapter) apply(ctx context.Context, input request, manifes
 			return append(phases, failed("Verify Windows lifecycle transition", err)), err
 		}
 		return a.uninstall(ctx, input, packageManifest, stateStore, state, phases)
+	}
+	if input.Plan.Operation == "backup" || input.Plan.Operation == "restore" {
+		if state.ProductVersion != manifest.ProductVersion || !strings.EqualFold(state.PackageManifestSha256, packageArtifact.Sha256) || manifest.Contracts.DatabaseMigration == "" {
+			err = errors.New("backup and restore require the exact Scout-managed installed product and database migration identity")
+			return append(phases, failed("Verify installed backup compatibility", err)), err
+		}
+		return a.runHeadlessLifecycle(ctx, input, manifest, packageManifest, state, phases)
 	}
 	if input.Plan.Operation == "install" && stateErr == nil && state.Installed {
 		err = errors.New("the Windows client is already installed; choose update or repair")
@@ -382,6 +428,153 @@ func (a *windowsClientAdapter) uninstall(ctx context.Context, input request, pac
 		pass("Uninstall Windows application", "The signed current-user uninstaller removed application binaries using an argument array."),
 		pass("Retain Windows client data", "Standalone database, original media, backups, logs, and protected credentials were retained for reinstall or recovery."),
 	), nil
+}
+
+func validateRuntimeArchivePath(value, operation string) (string, error) {
+	if value == "" || !filepath.IsAbs(value) || strings.ToLower(filepath.Ext(value)) != ".albackup" {
+		return "", errors.New("an absolute .albackup runtime location is required")
+	}
+	clean := filepath.Clean(value)
+	if operation == "restore" {
+		info, err := os.Lstat(clean)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("the restore archive is missing or is not a safe regular file")
+		}
+		resolved, err := filepath.EvalSymlinks(clean)
+		resolvedInfo, statErr := os.Stat(resolved)
+		if err != nil || statErr != nil || !os.SameFile(info, resolvedInfo) {
+			return "", errors.New("the restore archive uses an unsafe redirected path")
+		}
+		return resolved, nil
+	}
+	if operation != "backup" {
+		return "", errors.New("the runtime archive operation is unsupported")
+	}
+	if _, err := os.Lstat(clean); err == nil {
+		return "", errors.New("the backup archive already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("the backup archive location is unavailable")
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(clean))
+	if err != nil {
+		return "", errors.New("the backup destination folder is unavailable")
+	}
+	info, err := os.Lstat(parent)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("the backup destination folder is unsafe")
+	}
+	return filepath.Join(parent, filepath.Base(clean)), nil
+}
+
+func (a *windowsClientAdapter) runHeadlessLifecycle(ctx context.Context, input request, manifest releaseManifest, packageManifest windowsPackageManifest, state windowsClientState, phases []phase) ([]phase, error) {
+	archivePath, err := validateRuntimeArchivePath(input.Secrets["windowsArchivePath"], input.Plan.Operation)
+	if err != nil {
+		return append(phases, failed("Validate runtime backup location", err)), err
+	}
+	paths, err := a.system().Paths(state.ProductVersion)
+	if err != nil {
+		err = errors.New("the installed Windows application could not be located safely")
+		return append(phases, failed("Locate installed Windows application", err)), err
+	}
+	if err = a.system().VerifyAuthenticode(paths.Application, packageManifest.Signature); err != nil {
+		return append(phases, failed("Verify installed Windows application signature", err)), err
+	}
+	directory, err := os.MkdirTemp("", "apiarylens-windows-lifecycle-")
+	if err != nil {
+		err = errors.New("Scout could not create protected lifecycle staging")
+		return append(phases, failed("Prepare protected lifecycle request", err)), err
+	}
+	defer os.RemoveAll(directory)
+	if err = os.Chmod(directory, 0o700); err != nil {
+		err = errors.New("Scout could not protect lifecycle staging")
+		return append(phases, failed("Prepare protected lifecycle request", err)), err
+	}
+	requestPath := filepath.Join(directory, "request.json")
+	evidencePath := filepath.Join(directory, "evidence.json")
+	requestDocument := windowsHeadlessRequest{
+		SchemaVersion: 1,
+		Operation:     input.Plan.Operation,
+		ArchivePath:   archivePath,
+		Expected: windowsHeadlessIdentity{
+			ProductVersion:    manifest.ProductVersion,
+			DatabaseMigration: manifest.Contracts.DatabaseMigration,
+		},
+	}
+	rawRequest, err := json.Marshal(requestDocument)
+	if err != nil {
+		err = errors.New("Scout could not encode the lifecycle request")
+		return append(phases, failed("Prepare protected lifecycle request", err)), err
+	}
+	if err = os.WriteFile(requestPath, append(rawRequest, '\n'), 0o600); err != nil {
+		err = errors.New("Scout could not write protected lifecycle staging")
+		return append(phases, failed("Prepare protected lifecycle request", err)), err
+	}
+	operationContext, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	_, runErr := a.system().Run(operationContext, paths.Application, []string{
+		"--desktop-lifecycle-request=" + requestPath,
+		"--desktop-lifecycle-evidence=" + evidencePath,
+	})
+	evidence, evidenceErr := readWindowsHeadlessEvidence(evidencePath, requestDocument, archivePath)
+	if evidenceErr != nil {
+		err = errors.New("the installed Windows client did not return valid lifecycle evidence")
+		return append(phases, failed("Verify Windows "+input.Plan.Operation+" evidence", err)), err
+	}
+	if runErr != nil && evidence.Status == "passed" {
+		err = errors.New("the installed Windows client returned inconsistent lifecycle status")
+		return append(phases, failed("Verify Windows "+input.Plan.Operation+" evidence", err)), err
+	}
+	if evidence.Status != "passed" {
+		err = fmt.Errorf("the installed Windows client reported %s failure", input.Plan.Operation)
+		return append(phases, failed("Apply Windows "+input.Plan.Operation, err)), err
+	}
+	detail := fmt.Sprintf("The installed client verified %d database and media files using the exact %s/migration %s compatibility lock.", *evidence.Files, manifest.ProductVersion, manifest.Contracts.DatabaseMigration)
+	return append(phases,
+		pass("Apply Windows "+input.Plan.Operation, "The installed client completed the headless lifecycle operation without shell interpolation."),
+		pass("Verify Windows "+input.Plan.Operation+" evidence", detail),
+	), nil
+}
+
+func readWindowsHeadlessEvidence(path string, request windowsHeadlessRequest, archivePath string) (windowsHeadlessEvidence, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > 64<<10 {
+		return windowsHeadlessEvidence{}, errors.New("lifecycle evidence file is missing or unsafe")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(raw, []byte(archivePath)) {
+		return windowsHeadlessEvidence{}, errors.New("lifecycle evidence contains disallowed data")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var evidence windowsHeadlessEvidence
+	if err = decoder.Decode(&evidence); err != nil {
+		return windowsHeadlessEvidence{}, errors.New("lifecycle evidence schema is invalid")
+	}
+	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return windowsHeadlessEvidence{}, errors.New("lifecycle evidence contains trailing data")
+	}
+	if evidence.SchemaVersion != 1 || evidence.Operation != request.Operation || evidence.ProductVersion != request.Expected.ProductVersion || evidence.DatabaseMigration != request.Expected.DatabaseMigration || (evidence.Status != "passed" && evidence.Status != "failed") {
+		return windowsHeadlessEvidence{}, errors.New("lifecycle evidence identity does not match the request")
+	}
+	if evidence.SourceCreatedAt != "" {
+		if _, err = time.Parse(time.RFC3339Nano, evidence.SourceCreatedAt); err != nil {
+			return windowsHeadlessEvidence{}, errors.New("lifecycle evidence timestamp is invalid")
+		}
+	}
+	if evidence.Status == "passed" {
+		if evidence.ErrorCode != "" || evidence.Files == nil || *evidence.Files < 1 {
+			return windowsHeadlessEvidence{}, errors.New("successful lifecycle evidence is incomplete")
+		}
+		if request.Operation == "restore" && (evidence.RecoveryBackupVerified == nil || !*evidence.RecoveryBackupVerified || evidence.RollbackPerformed == nil) {
+			return windowsHeadlessEvidence{}, errors.New("restore evidence does not prove recovery protection")
+		}
+		return evidence, nil
+	}
+	allowedErrors := map[string]bool{"invalid_request": true, "backup_failed": request.Operation == "backup", "restore_failed": request.Operation == "restore", "incompatible_backup": request.Operation == "restore"}
+	if !allowedErrors[evidence.ErrorCode] {
+		return windowsHeadlessEvidence{}, errors.New("failed lifecycle evidence has an unsupported error code")
+	}
+	return evidence, nil
 }
 
 func windowsPackageManifestArtifact(version, architecture string, manifest releaseManifest) (manifestArtifact, error) {

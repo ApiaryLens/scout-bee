@@ -14,6 +14,19 @@ if (packageVersion !== version || compatibility.scoutVersion !== version) {
   );
 }
 
+const expectedChannel = version.includes("-preview.")
+  ? "preview"
+  : version.includes("-rc.")
+    ? "rc"
+    : version.includes("-")
+      ? "unsupported"
+      : "stable";
+if (compatibility.channel !== expectedChannel) {
+  throw new Error(
+    `Scout version ${version} requires compatibility channel ${expectedChannel}, not ${compatibility.channel}`,
+  );
+}
+
 const tag =
   process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : "";
 if (tag && tag !== `v${version}`) {

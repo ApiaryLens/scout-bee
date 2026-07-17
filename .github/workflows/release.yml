@@ -4,6 +4,12 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      allow_unsigned_preview:
+        description: "Explicitly allow an unsigned Windows executable for this Preview run only"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -46,16 +52,21 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.scoutVersion=$version" `
             -o "dist/scout-bee-$version-windows-amd64.exe" .
 
+      - name: Resolve fail-closed release signing policy
+        id: release-policy
+        shell: pwsh
+        env:
+          SCOUT_ALLOW_UNSIGNED_PREVIEW: ${{ inputs.allow_unsigned_preview && 'true' || 'false' }}
+          SCOUT_WINDOWS_SIGNING_AVAILABLE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' && secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD != '' }}
+        run: node scripts/release-policy.mjs
+
       - name: Authenticode-sign and timestamp Windows executable
+        if: steps.release-policy.outputs.signing_mode == 'signed'
         shell: pwsh
         env:
           WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
           WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_BASE64) -or
-              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD)) {
-            throw 'Windows signing secrets are required; unsigned release packages are forbidden.'
-          }
           $certificatePath = Join-Path $env:RUNNER_TEMP 'scout-bee-signing.pfx'
           try {
             [IO.File]::WriteAllBytes(
@@ -78,11 +89,28 @@ jobs:
             Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
           }
 
-      - name: Upload signed Windows package
+      - name: Mark explicitly unsigned Preview executable
+        if: steps.release-policy.outputs.signing_mode == 'unsigned-preview'
+        shell: pwsh
+        run: |
+          $artifact = Get-ChildItem dist\scout-bee-*-windows-amd64.exe -File -ErrorAction Stop
+          $unsignedName = $artifact.BaseName + '-UNSIGNED-PREVIEW.exe'
+          Move-Item -LiteralPath $artifact.FullName -Destination (Join-Path $artifact.DirectoryName $unsignedName)
+
+      - name: Record Windows signing evidence
+        shell: pwsh
+        env:
+          SCOUT_WINDOWS_SIGNING_MODE: ${{ steps.release-policy.outputs.signing_mode }}
+          SCOUT_EXPLICIT_UNSIGNED_PREVIEW_OPT_IN: ${{ steps.release-policy.outputs.explicit_unsigned_preview_opt_in }}
+        run: node scripts/build-windows-signing-metadata.mjs
+
+      - name: Upload Windows package and signing evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: scout-bee-windows-amd64
-          path: dist/scout-bee-*-windows-amd64.exe
+          path: |
+            dist/scout-bee-*-windows-amd64*.exe
+            dist/scout-bee-windows-signing.json
           if-no-files-found: error
 
   linux:
@@ -176,8 +204,9 @@ jobs:
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
         with:
           subject-path: |
-            dist/scout-bee-*-windows-amd64.exe
+            dist/scout-bee-*-windows-amd64*.exe
             dist/scout-bee-*-linux-amd64.tar.gz
+            dist/scout-bee-windows-signing.json
             dist/scout-bee-release-manifest.json
             dist/scout-bee-sbom.cdx.json
             dist/scout-bee-license-report.md
@@ -188,9 +217,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="$(tr -d '\r\n' < VERSION)"
+          signing_mode="$(node -e "const fs=require('fs'); process.stdout.write(JSON.parse(fs.readFileSync('dist/scout-bee-windows-signing.json','utf8')).signingMode)")"
+          release_warning=""
+          if [[ "$signing_mode" == "unsigned-preview" ]]; then
+            release_warning=$'## Unsigned Preview warning\n\nThe Windows executable in this Preview is intentionally **not Authenticode signed** because the signing secrets were unavailable and the maintainer explicitly opted in for this run. Verify `SHA256SUMS` and the GitHub artifact attestation before testing. Do not treat this Preview package as an RC or Stable build.'
+          fi
           if [[ "$version" == *-* ]]; then
             gh release create "$GITHUB_REF_NAME" dist/* \
-              --verify-tag --prerelease --generate-notes \
+              --verify-tag --prerelease --latest=false --generate-notes --notes "$release_warning" \
               --title "Scout Bee $version"
           else
             gh release create "$GITHUB_REF_NAME" dist/* \

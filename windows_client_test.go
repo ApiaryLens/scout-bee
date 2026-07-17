@@ -20,11 +20,15 @@ type recordedWindowsRun struct {
 }
 
 type fakeWindowsLifecycle struct {
-	paths        windowsLifecyclePaths
-	runs         []recordedWindowsRun
-	verified     []string
-	signatureErr error
-	healthCalls  int
+	paths            windowsLifecyclePaths
+	runs             []recordedWindowsRun
+	verified         []string
+	signatureErr     error
+	healthCalls      int
+	headlessEvidence *windowsHeadlessEvidence
+	headlessRaw      []byte
+	headlessRunErr   error
+	headlessRequests []windowsHeadlessRequest
 }
 
 func (f *fakeWindowsLifecycle) Supported() bool                             { return true }
@@ -35,6 +39,32 @@ func (f *fakeWindowsLifecycle) VerifyAuthenticode(path string, _ windowsPackageS
 }
 func (f *fakeWindowsLifecycle) Run(_ context.Context, executable string, args []string) (string, error) {
 	f.runs = append(f.runs, recordedWindowsRun{executable: executable, args: append([]string(nil), args...)})
+	if len(args) == 2 && strings.HasPrefix(args[0], "--desktop-lifecycle-request=") && strings.HasPrefix(args[1], "--desktop-lifecycle-evidence=") {
+		requestPath := strings.TrimPrefix(args[0], "--desktop-lifecycle-request=")
+		evidencePath := strings.TrimPrefix(args[1], "--desktop-lifecycle-evidence=")
+		rawRequest, err := os.ReadFile(requestPath)
+		if err != nil {
+			return "", err
+		}
+		var request windowsHeadlessRequest
+		if err = json.Unmarshal(rawRequest, &request); err != nil {
+			return "", err
+		}
+		f.headlessRequests = append(f.headlessRequests, request)
+		rawEvidence := f.headlessRaw
+		if rawEvidence == nil {
+			evidence := f.headlessEvidence
+			if evidence == nil {
+				files := 1
+				evidence = &windowsHeadlessEvidence{SchemaVersion: 1, Operation: request.Operation, Status: "passed", ProductVersion: request.Expected.ProductVersion, DatabaseMigration: request.Expected.DatabaseMigration, Files: &files}
+			}
+			rawEvidence, _ = json.Marshal(evidence)
+		}
+		if err = os.WriteFile(evidencePath, rawEvidence, 0o600); err != nil {
+			return "", err
+		}
+		return "", f.headlessRunErr
+	}
 	return "", nil
 }
 func (f *fakeWindowsLifecycle) HealthSmoke(_ context.Context, executable string) (windowsSmokeEvidence, error) {
@@ -98,7 +128,7 @@ func windowsAdapterFixture(t *testing.T, cacheSetup bool) (*windowsClientAdapter
 	}
 	manifest := releaseManifest{
 		Product: "ApiaryLens", ProductVersion: packageDocument.ProductVersion, Channel: "preview", SourceCommit: packageDocument.SourceCommit,
-		Contracts: manifestContracts{DeploymentPlan: 1}, Artifacts: []manifestArtifact{packageArtifact, setup, releases, packagePayload},
+		Contracts: manifestContracts{DeploymentPlan: 1, DatabaseMigration: "0004"}, Artifacts: []manifestArtifact{packageArtifact, setup, releases, packagePayload},
 	}
 	executor := &executor{cacheDirectory: cache, windowsStateDirectory: state, windows: system}
 	if err = os.WriteFile(executor.cachePath(packageArtifact), packageBytes, 0o600); err != nil {
@@ -185,16 +215,99 @@ func TestWindowsClientPermanentDeleteIsPlanningOnly(t *testing.T) {
 	}
 }
 
-func TestWindowsClientRejectsUnimplementedOperationsBeforeSetup(t *testing.T) {
+func TestWindowsClientRejectsExportBeforeSetup(t *testing.T) {
 	adapter, _, input, system := windowsAdapterFixture(t, true)
-	for _, operation := range []string{"backup", "restore", "export"} {
-		input.Plan.Operation = operation
-		if _, err := adapter.preflight(context.Background(), input); err == nil || !strings.Contains(err.Error(), "not implemented") {
-			t.Fatalf("%s should fail closed: %v", operation, err)
-		}
+	input.Plan.Operation = "export"
+	if _, err := adapter.preflight(context.Background(), input); err == nil || !strings.Contains(err.Error(), "not implemented") {
+		t.Fatalf("export should fail closed: %v", err)
 	}
 	if len(system.runs) != 0 {
 		t.Fatalf("unsupported operations executed Windows lifecycle commands: %+v", system.runs)
+	}
+}
+
+func TestWindowsClientBackupUsesRuntimeOnlyArchiveAndAllowListedEvidence(t *testing.T) {
+	adapter, manifest, input, system := windowsAdapterFixture(t, true)
+	if _, err := adapter.apply(context.Background(), input, manifest); err != nil {
+		t.Fatal(err)
+	}
+	system.runs = nil
+	archivePath := filepath.Join(t.TempDir(), "family.albackup")
+	expectedArchivePath, err := validateRuntimeArchivePath(archivePath, "backup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Plan.Operation = "backup"
+	input.Secrets = map[string]string{"windowsArchivePath": archivePath}
+	phases, err := adapter.apply(context.Background(), input, manifest)
+	if err != nil {
+		t.Fatalf("backup failed: %v; phases=%+v", err, phases)
+	}
+	if len(system.headlessRequests) != 1 || !sameWindowsPath(system.headlessRequests[0].ArchivePath, expectedArchivePath) {
+		t.Fatalf("runtime archive was not handed to the installed client: %+v", system.headlessRequests)
+	}
+	for _, run := range system.runs {
+		if strings.Contains(strings.Join(run.args, " "), archivePath) {
+			t.Fatalf("archive path leaked into process arguments: %+v", run.args)
+		}
+	}
+	encodedPhases, _ := json.Marshal(phases)
+	if strings.Contains(string(encodedPhases), archivePath) {
+		t.Fatalf("archive path leaked into phases: %s", encodedPhases)
+	}
+	store, _ := adapter.newStateStore()
+	rawState, _ := os.ReadFile(store.path)
+	if strings.Contains(string(rawState), archivePath) {
+		t.Fatalf("archive path leaked into lifecycle state: %s", rawState)
+	}
+}
+
+func TestWindowsClientRestoreFailureIsSanitizedAndDoesNotRunSetup(t *testing.T) {
+	adapter, manifest, input, system := windowsAdapterFixture(t, true)
+	if _, err := adapter.apply(context.Background(), input, manifest); err != nil {
+		t.Fatal(err)
+	}
+	system.runs = nil
+	archivePath := filepath.Join(t.TempDir(), "private-family-name.albackup")
+	if err := os.WriteFile(archivePath, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rollback := true
+	verified := true
+	system.headlessEvidence = &windowsHeadlessEvidence{
+		SchemaVersion: 1, Operation: "restore", Status: "failed",
+		ProductVersion: manifest.ProductVersion, DatabaseMigration: manifest.Contracts.DatabaseMigration,
+		RecoveryBackupVerified: &verified, RollbackPerformed: &rollback, RollbackVerified: &verified,
+		ErrorCode: "restore_failed",
+	}
+	input.Plan.Operation = "restore"
+	input.Secrets = map[string]string{"windowsArchivePath": archivePath}
+	phases, err := adapter.apply(context.Background(), input, manifest)
+	if err == nil || !strings.Contains(err.Error(), "reported restore failure") {
+		t.Fatalf("restore failure was not propagated safely: %v", err)
+	}
+	encoded, _ := json.Marshal(phases)
+	if strings.Contains(string(encoded), archivePath) || strings.Contains(string(encoded), "private-family-name") {
+		t.Fatalf("restore path leaked into phases: %s", encoded)
+	}
+	for _, run := range system.runs {
+		if reflect.DeepEqual(run.args, []string{"--silent"}) {
+			t.Fatalf("restore unexpectedly ran Setup: %+v", system.runs)
+		}
+	}
+}
+
+func TestWindowsClientRejectsEvidenceWithPathField(t *testing.T) {
+	adapter, manifest, input, system := windowsAdapterFixture(t, true)
+	if _, err := adapter.apply(context.Background(), input, manifest); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "family.albackup")
+	system.headlessRaw = []byte(`{"schemaVersion":1,"operation":"backup","status":"passed","productVersion":"0.1.0-preview.1","databaseMigration":"0004","files":1,"archivePath":"C:\\private\\family.albackup"}`)
+	input.Plan.Operation = "backup"
+	input.Secrets = map[string]string{"windowsArchivePath": archivePath}
+	if _, err := adapter.apply(context.Background(), input, manifest); err == nil || !strings.Contains(err.Error(), "valid lifecycle evidence") {
+		t.Fatalf("unknown evidence path field should fail closed: %v", err)
 	}
 }
 
