@@ -26,6 +26,16 @@ type ReleaseIdentity = {
   manifestSha256: string;
 };
 
+type OperationSummary = {
+  planId: string;
+  operation: Operation;
+  target: string;
+  mode: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+};
+
 const cloudflareAllowances = [
   ["Workers", "100,000 dynamic requests each day"],
   [
@@ -67,11 +77,13 @@ function App() {
   const [bootstrapToken, setBootstrapToken] = useState("");
   const [keepData, setKeepData] = useState(true);
   const [costAcknowledged, setCostAcknowledged] = useState(false);
+  const [restoreAcknowledged, setRestoreAcknowledged] = useState(false);
   const [step, setStep] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [phases, setPhases] = useState<Phase[]>([]);
   const [release, setRelease] = useState<ReleaseIdentity | null>(null);
+  const [history, setHistory] = useState<OperationSummary[]>([]);
   const [form, setForm] = useState<Record<string, string>>({
     accountReference: "",
     workerName: "apiarylens-family",
@@ -147,6 +159,13 @@ function App() {
         ),
       );
   }, [productChannel]);
+  async function refreshHistory() {
+    const result = await call<{ items: OperationSummary[] }>("/api/v1/history");
+    setHistory(result.items);
+  }
+  useEffect(() => {
+    void refreshHistory().catch(() => undefined);
+  }, []);
   const update = (name: string, value: string) =>
     setForm((current) => ({ ...current, [name]: value }));
 
@@ -176,6 +195,7 @@ function App() {
         }),
       });
       setPhases(result.phases);
+      await refreshHistory();
       setStep(4);
     } catch (caught) {
       setError(
@@ -231,6 +251,13 @@ function App() {
     a.click();
     URL.revokeObjectURL(a.href);
   }
+  const lastVerifiedBackup = history.find(
+    (item) =>
+      item.operation === "backup" &&
+      item.mode === "apply" &&
+      item.status === "passed",
+  );
+  const lastRestore = history.find((item) => item.operation === "restore");
 
   return (
     <div className="shell">
@@ -316,6 +343,38 @@ function App() {
                 </p>
               </button>
             </section>
+            <section
+              className="recovery-status"
+              aria-labelledby="recovery-status-heading"
+            >
+              <div>
+                <p className="eyebrow">Recovery readiness</p>
+                <h2 id="recovery-status-heading">Backup and restore history</h2>
+                <p>
+                  A browser or phone's offline working copy is not a server
+                  backup. Scout backups include the deployment's records and
+                  private media.
+                </p>
+              </div>
+              <dl>
+                <div>
+                  <dt>Last verified backup</dt>
+                  <dd>
+                    {lastVerifiedBackup?.finishedAt
+                      ? new Date(lastVerifiedBackup.finishedAt).toLocaleString()
+                      : "No verified Scout backup recorded on this computer"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Last restore attempt</dt>
+                  <dd>
+                    {lastRestore
+                      ? `${lastRestore.status} · ${new Date(lastRestore.finishedAt ?? lastRestore.startedAt).toLocaleString()}`
+                      : "No restore recorded on this computer"}
+                  </dd>
+                </div>
+              </dl>
+            </section>
             {target === "cloudflare" && <CloudflareCostGuide />}
           </>
         )}
@@ -325,9 +384,10 @@ function App() {
               What should Scout Bee do?
               <select
                 value={operation}
-                onChange={(event) =>
-                  setOperation(event.target.value as Operation)
-                }
+                onChange={(event) => {
+                  setOperation(event.target.value as Operation);
+                  setRestoreAcknowledged(false);
+                }}
               >
                 <option value="install">Install a new deployment</option>
                 <option value="update">Update an existing deployment</option>
@@ -559,6 +619,30 @@ function App() {
                 recovered later
               </label>
             )}
+            {operation === "restore" && (
+              <div className="restore-warning" role="note">
+                <strong>
+                  Restore replaces current server records and media.
+                </strong>
+                <p>
+                  Scout first creates a recovery backup, verifies the selected
+                  archive and target compatibility, restores the server, revokes
+                  existing sign-in sessions, and requires a passing health
+                  check.
+                </p>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={restoreAcknowledged}
+                    onChange={(event) =>
+                      setRestoreAcknowledged(event.target.checked)
+                    }
+                  />
+                  I understand the current server data will be replaced and
+                  users must sign in again.
+                </label>
+              </div>
+            )}
             <details>
               <summary>View the operator plan</summary>
               <pre>{JSON.stringify(plan, null, 2)}</pre>
@@ -633,6 +717,10 @@ function App() {
                     !release ||
                     (target === "cloudflare" && !costAcknowledged) ||
                     (target === "cloudflare" && cloudflareToken.length === 0) ||
+                    (operation === "restore" && !restoreAcknowledged) ||
+                    (operation === "restore" &&
+                      target === "cloudflare" &&
+                      form.backupFilePath.length === 0) ||
                     (operation === "install" && bootstrapToken.length < 16)
                   }
                   onClick={() => void run("apply")}

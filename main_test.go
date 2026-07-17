@@ -429,6 +429,30 @@ func TestRedactsRuntimeSecrets(t *testing.T) {
 	}
 }
 
+func TestOperationHistoryReportsBackupVerificationWithoutPlansOrSecrets(t *testing.T) {
+	store := &operationStore{directory: t.TempDir()}
+	backupPlan := validPlan()
+	backupPlan.Operation = "backup"
+	backupPlan.PlanID = "11111111-1111-4111-8111-111111111111"
+	finished := time.Date(2026, 7, 17, 16, 0, 0, 0, time.UTC)
+	if err := store.save(operationState{
+		Plan: backupPlan, Mode: "apply", Status: "passed", StartedAt: finished.Add(-time.Minute), FinishedAt: &finished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.history(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Operation != "backup" || items[0].Mode != "apply" || items[0].Status != "passed" || items[0].FinishedAt == nil {
+		t.Fatalf("unexpected backup history: %+v", items)
+	}
+	raw, _ := json.Marshal(items)
+	if bytes.Contains(raw, []byte("cloudflare"+"ApiToken")) || bytes.Contains(raw, []byte("release")) {
+		t.Fatalf("history exposed plan or secret-shaped data: %s", raw)
+	}
+}
+
 func TestPlanJSONUsesVersionedCamelCaseContract(t *testing.T) {
 	raw, err := json.Marshal(validPlan())
 	if err != nil {

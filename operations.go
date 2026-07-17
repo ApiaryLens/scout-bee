@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -20,6 +21,16 @@ type operationState struct {
 }
 
 type operationStore struct{ directory string }
+
+type operationSummary struct {
+	PlanID     string     `json:"planId"`
+	Operation  string     `json:"operation"`
+	Target     string     `json:"target"`
+	Mode       string     `json:"mode"`
+	Status     string     `json:"status"`
+	StartedAt  time.Time  `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+}
 
 func newOperationStore() *operationStore {
 	root, err := os.UserConfigDir()
@@ -68,6 +79,48 @@ func (s *operationStore) load(id string) (operationState, error) {
 		return operationState{}, err
 	}
 	return state, nil
+}
+
+func (s *operationStore) history(limit int) ([]operationSummary, error) {
+	entries, err := os.ReadDir(s.directory)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]operationSummary, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		state, loadErr := s.load(id)
+		if loadErr != nil {
+			continue
+		}
+		summaries = append(summaries, operationSummary{
+			PlanID: state.Plan.PlanID, Operation: state.Plan.Operation, Target: state.Plan.Target, Mode: state.Mode,
+			Status: state.Status, StartedAt: state.StartedAt, FinishedAt: state.FinishedAt,
+		})
+	}
+	sort.Slice(summaries, func(left, right int) bool {
+		return summaries[left].StartedAt.After(summaries[right].StartedAt)
+	})
+	if limit > 0 && len(summaries) > limit {
+		summaries = summaries[:limit]
+	}
+	return summaries, nil
+}
+
+func (e *executor) historyHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"message": "Method not allowed"})
+		return
+	}
+	items, err := e.store.history(20)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]string{"message": "Operation history is unavailable"})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (e *executor) operationHTTP(w http.ResponseWriter, r *http.Request) {

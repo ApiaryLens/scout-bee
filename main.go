@@ -37,6 +37,7 @@ func main() {
 	executor := newExecutor()
 	mux.HandleFunc("/api/v1/release", authorized(token, executor.releaseHTTP))
 	mux.HandleFunc("/api/v1/execute", authorized(token, executor.executeHTTP))
+	mux.HandleFunc("/api/v1/history", authorized(token, executor.historyHTTP))
 	mux.HandleFunc("/api/v1/operations/", authorized(token, executor.operationHTTP))
 	mux.HandleFunc("/api/v1/diagnostics/", authorized(token, executor.diagnosticsHTTP))
 	mux.Handle("/", securityHeaders(http.FileServer(http.FS(assets))))
