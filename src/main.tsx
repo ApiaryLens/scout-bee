@@ -4,7 +4,15 @@ import "./style.css";
 
 type Target = "cloudflare" | "compose-ssh" | "plan-only";
 type Operation =
-  "install" | "update" | "backup" | "restore" | "export" | "uninstall";
+  | "install"
+  | "update"
+  | "repair"
+  | "rollback"
+  | "backup"
+  | "restore"
+  | "export"
+  | "uninstall";
+type ProductChannel = "preview" | "release-candidate" | "stable";
 type Phase = {
   name: string;
   state: "waiting" | "running" | "passed" | "failed";
@@ -13,7 +21,7 @@ type Phase = {
 
 type ReleaseIdentity = {
   version: string;
-  channel: "preview" | "release-candidate" | "stable";
+  channel: ProductChannel;
   manifestUrl: string;
   manifestSha256: string;
 };
@@ -53,6 +61,8 @@ const call = async <T,>(path: string, init?: RequestInit): Promise<T> => {
 function App() {
   const [target, setTarget] = useState<Target>("cloudflare");
   const [operation, setOperation] = useState<Operation>("install");
+  const [productChannel, setProductChannel] =
+    useState<ProductChannel>("stable");
   const [cloudflareToken, setCloudflareToken] = useState("");
   const [bootstrapToken, setBootstrapToken] = useState("");
   const [keepData, setKeepData] = useState(true);
@@ -86,7 +96,7 @@ function App() {
         release ??
         ({
           version: "",
-          channel: "preview",
+          channel: productChannel,
           manifestUrl: "",
           manifestSha256: "",
         } as const),
@@ -117,19 +127,26 @@ function App() {
             },
           }),
     }),
-    [target, form, operation, keepData, release],
+    [target, form, operation, keepData, release, productChannel],
   );
   useEffect(() => {
-    void call<ReleaseIdentity>("/api/v1/release")
+    setRelease(null);
+    setError("");
+    const advanced = productChannel === "stable" ? "" : "&advanced=true";
+    void call<ReleaseIdentity>(
+      `/api/v1/release?channel=${productChannel}${advanced}`,
+    )
       .then(setRelease)
       .catch((caught) =>
         setError(
-          caught instanceof Error
-            ? caught.message
-            : "The release identity is unavailable",
+          productChannel === "stable"
+            ? "No compatible Stable release is currently available. Preview and RC builds are available only through Advanced release channel opt-in."
+            : caught instanceof Error
+              ? caught.message
+              : "The release identity is unavailable",
         ),
       );
-  }, []);
+  }, [productChannel]);
   const update = (name: string, value: string) =>
     setForm((current) => ({ ...current, [name]: value }));
 
@@ -314,12 +331,44 @@ function App() {
               >
                 <option value="install">Install a new deployment</option>
                 <option value="update">Update an existing deployment</option>
+                <option value="repair">
+                  Repair using the same verified release
+                </option>
+                <option value="rollback">
+                  Roll back to a selected compatible release
+                </option>
                 <option value="backup">Create and verify a backup</option>
                 <option value="restore">Restore a verified backup</option>
                 <option value="export">Export owned data</option>
                 <option value="uninstall">Uninstall ApiaryLens</option>
               </select>
             </label>
+            <div className="release-selection">
+              <b>Product release channel</b>
+              <span>Stable is always selected by default.</span>
+              <details>
+                <summary>Advanced release channel</summary>
+                <label>
+                  Channel
+                  <select
+                    value={productChannel}
+                    onChange={(event) =>
+                      setProductChannel(event.target.value as ProductChannel)
+                    }
+                  >
+                    <option value="stable">Stable</option>
+                    <option value="preview">
+                      Preview (changing frequently)
+                    </option>
+                    <option value="release-candidate">Release candidate</option>
+                  </select>
+                </label>
+                <small>
+                  Preview and RC builds can change frequently and require this
+                  explicit advanced selection on every Scout installation.
+                </small>
+              </details>
+            </div>
             {target === "compose-ssh" ? (
               <>
                 <Field
@@ -388,10 +437,14 @@ function App() {
                 />
                 {(operation === "backup" ||
                   operation === "export" ||
-                  operation === "update") && (
+                  operation === "update" ||
+                  operation === "repair" ||
+                  operation === "rollback") && (
                   <Field
                     label={
-                      operation === "update"
+                      operation === "update" ||
+                      operation === "repair" ||
+                      operation === "rollback"
                         ? "Local folder for the required pre-update backup (optional)"
                         : "Local folder for the archive (optional)"
                     }

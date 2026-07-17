@@ -71,7 +71,7 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 	remoteBundle := "/tmp/apiarylens-" + input.Plan.PlanID + ".tar.gz"
 	remoteBootstrap := "/tmp/apiarylens-bootstrap-" + input.Plan.PlanID
 	remoteAuthRoot := "/tmp/apiarylens-auth-root-" + input.Plan.PlanID
-	if input.Plan.Operation == "install" || input.Plan.Operation == "update" {
+	if input.Plan.Operation == "install" || input.Plan.Operation == "update" || input.Plan.Operation == "repair" || input.Plan.Operation == "rollback" {
 		artifact, artifactErr := artifactFor(manifest, "compose")
 		if artifactErr != nil {
 			return []phase{failed("Select verified Compose bundle", artifactErr)}, artifactErr
@@ -132,7 +132,7 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 		return append(phases, failed("Apply remote Compose operation", err)), err
 	}
 	phases = append(phases, pass("Apply remote Compose operation", strings.TrimSpace(output)))
-	if input.Plan.Operation == "install" || input.Plan.Operation == "update" {
+	if input.Plan.Operation == "install" || input.Plan.Operation == "update" || input.Plan.Operation == "repair" || input.Plan.Operation == "rollback" {
 		if err = (&cloudflareAdapter{executor: a.executor}).verifyHealth(ctx, strings.TrimSuffix(compose.PublicURL, "/")+"/health", manifest); err != nil {
 			return append(phases, failed("Verify public HTTPS health", err)), err
 		}
@@ -341,10 +341,10 @@ safe_backup() {
 }
 
 case "$operation" in
-  install|update)
+  install|update|repair|rollback)
     previous=''
     if [ -L "$current" ]; then previous=$(readlink -f "$current"); fi
-    if [ "$operation" = update ] && [ -n "$previous" ]; then safe_backup >/dev/null; fi
+    if [ "$operation" != install ] && [ -n "$previous" ]; then safe_backup >/dev/null; fi
     mkdir -p "$release_dir"
     tar xzf "$bundle" -C "$release_dir"
     rm -f "$bundle"

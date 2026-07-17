@@ -68,7 +68,7 @@ func (a *cloudflareAdapter) preflight(ctx context.Context, input request) ([]pha
 
 func (a *cloudflareAdapter) apply(ctx context.Context, input request, manifest releaseManifest) ([]phase, error) {
 	switch input.Plan.Operation {
-	case "install", "update":
+	case "install", "update", "repair", "rollback":
 		return a.deploy(ctx, input, manifest)
 	case "backup", "export", "restore":
 		return a.maintain(ctx, input, manifest)
@@ -266,7 +266,7 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 	workersDev := cf.CustomDomain == "" || isWorkersDevAddress(cf.CustomDomain)
 	token := input.Secrets["cloudflareApiToken"]
 	environment := map[string]string{"CLOUDFLARE_API_TOKEN": token}
-	if input.Plan.Operation == "update" {
+	if input.Plan.Operation == "update" || input.Plan.Operation == "repair" || input.Plan.Operation == "rollback" {
 		backupInput := input
 		backupInput.Plan.Operation = "backup"
 		backupPhases, backupErr := a.maintain(ctx, backupInput, manifest)

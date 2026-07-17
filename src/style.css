@@ -194,6 +194,25 @@ h1 {
   gap: 0.45rem;
   font-weight: 750;
 }
+.release-selection {
+  display: grid;
+  gap: 0.4rem;
+  grid-column: 1 / -1;
+  padding: 1rem;
+  border: 1px solid #d8c48a;
+  border-radius: 10px;
+  background: #fff8df;
+}
+.release-selection > span,
+.release-selection small {
+  color: #605b51;
+}
+.release-selection details {
+  margin-top: 0.4rem;
+}
+.release-selection details label {
+  margin-top: 0.8rem;
+}
 .form input,
 .form select,
 .runtime-secret input {

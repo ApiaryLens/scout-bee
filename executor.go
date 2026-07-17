@@ -32,7 +32,11 @@ type commandRunner interface {
 
 type systemRunner struct{}
 
-const officialReleaseManifestURL = "https://apiarylens.org/releases/0.1.0-preview.1/manifest.json"
+var officialReleaseManifestURLs = map[string]string{
+	"stable":            "https://apiarylens.org/releases/stable/manifest.json",
+	"release-candidate": "https://apiarylens.org/releases/release-candidate/manifest.json",
+	"preview":           "https://apiarylens.org/releases/0.1.0-preview.1/manifest.json",
+}
 
 var allowedExecutables = map[string]bool{
 	"wrangler": true, "ssh": true, "scp": true, "ssh-keyscan": true,
@@ -51,7 +55,20 @@ func (e *executor) releaseHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"message": "Method not allowed"})
 		return
 	}
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, officialReleaseManifestURL, nil)
+	channel := r.URL.Query().Get("channel")
+	if channel == "" {
+		channel = "stable"
+	}
+	manifestURL, knownChannel := officialReleaseManifestURLs[channel]
+	if !knownChannel {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"message": "The requested release channel is unsupported"})
+		return
+	}
+	if channel != "stable" && r.URL.Query().Get("advanced") != "true" {
+		jsonResponse(w, http.StatusForbidden, map[string]string{"message": "Preview and release-candidate channels require explicit advanced opt-in"})
+		return
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, manifestURL, nil)
 	if err != nil {
 		jsonResponse(w, http.StatusBadGateway, map[string]string{"message": "The official release identity is unavailable"})
 		return
@@ -68,14 +85,14 @@ func (e *executor) releaseHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var manifest releaseManifest
-	if err = json.Unmarshal(raw, &manifest); err != nil || manifest.Product != "ApiaryLens" || manifest.ProductVersion != supportedProductVersion {
+	if err = json.Unmarshal(raw, &manifest); err != nil || manifest.Product != "ApiaryLens" || manifest.Channel != channel || !compatibleProductVersion(manifest.ProductVersion) {
 		jsonResponse(w, http.StatusBadGateway, map[string]string{"message": "The official release identity is incompatible"})
 		return
 	}
 	digest := sha256.Sum256(raw)
 	jsonResponse(w, http.StatusOK, release{
 		Version: manifest.ProductVersion, Channel: manifest.Channel,
-		ManifestURL: officialReleaseManifestURL, ManifestSha256: hex.EncodeToString(digest[:]),
+		ManifestURL: manifestURL, ManifestSha256: hex.EncodeToString(digest[:]),
 	})
 }
 
@@ -109,15 +126,23 @@ type executor struct {
 	client        *http.Client
 	allowLoopback bool
 	store         *operationStore
+	cacheDirectory string
 	activeMu      sync.Mutex
 	active        map[string]context.CancelFunc
 }
 
 func newExecutor() *executor {
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil || cacheRoot == "" {
+		cacheRoot = os.TempDir()
+	}
+	cacheDirectory := filepath.Join(cacheRoot, "ApiaryLens", "ScoutBee", "releases")
+	_ = os.MkdirAll(cacheDirectory, 0o700)
 	return &executor{
 		runner: systemRunner{},
 		store:  newOperationStore(),
 		active: map[string]context.CancelFunc{},
+		cacheDirectory: cacheDirectory,
 		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return errors.New("release downloads may not redirect")
 		}},
@@ -261,6 +286,18 @@ func (e *executor) fetchManifest(ctx context.Context, expected release) (release
 }
 
 func (e *executor) downloadArtifact(ctx context.Context, artifact manifestArtifact, directory string) (string, error) {
+	destinationDirectory := directory
+	if e.cacheDirectory != "" {
+		destinationDirectory = e.cacheDirectory
+	}
+	if err := os.MkdirAll(destinationDirectory, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(destinationDirectory, strings.ToLower(artifact.Sha256)+"-"+filepath.Base(artifact.Name))
+	if cachedArtifactMatches(path, artifact) {
+		return path, nil
+	}
+	_ = os.Remove(path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, artifact.URL, nil)
 	if err != nil {
 		return "", err
@@ -276,9 +313,14 @@ func (e *executor) downloadArtifact(ctx context.Context, artifact manifestArtifa
 	if response.ContentLength > 0 && response.ContentLength != artifact.Bytes {
 		return "", errors.New("artifact size does not match the release manifest")
 	}
-	path := filepath.Join(directory, filepath.Base(artifact.Name))
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	file, err := os.CreateTemp(destinationDirectory, ".apiarylens-download-*")
 	if err != nil {
+		return "", err
+	}
+	temporaryPath := file.Name()
+	defer os.Remove(temporaryPath)
+	if err = file.Chmod(0o600); err != nil {
+		_ = file.Close()
 		return "", err
 	}
 	hash := sha256.New()
@@ -288,10 +330,29 @@ func (e *executor) downloadArtifact(ctx context.Context, artifact manifestArtifa
 		return "", errors.Join(copyErr, closeErr)
 	}
 	if written != artifact.Bytes || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), artifact.Sha256) {
-		_ = os.Remove(path)
 		return "", errors.New("artifact size or checksum verification failed")
 	}
+	if err = os.Rename(temporaryPath, path); err != nil {
+		return "", err
+	}
 	return path, nil
+}
+
+func cachedArtifactMatches(path string, artifact manifestArtifact) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != artifact.Bytes {
+		return false
+	}
+	hash := sha256.New()
+	if _, err = io.Copy(hash, file); err != nil {
+		return false
+	}
+	return strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), artifact.Sha256)
 }
 
 func artifactFor(manifest releaseManifest, target string) (manifestArtifact, error) {

@@ -17,8 +17,6 @@ import (
 // exact compatibility baseline consumed by this transitional executor.
 var scoutVersion = "0.1.0-preview.1"
 
-const supportedProductVersion = "0.1.0-preview.1"
-
 type release struct {
 	Version        string `json:"version"`
 	Channel        string `json:"channel"`
@@ -102,7 +100,12 @@ var (
 	planID       = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
 	remotePath   = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 	sshName      = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	compatibleVersion = regexp.MustCompile(`^0\.1\.\d+(?:-(?:preview|rc)\.\d+)?$`)
 )
+
+func compatibleProductVersion(version string) bool {
+	return compatibleVersion.MatchString(version)
+}
 
 func validate(p plan) error {
 	if p.SchemaVersion != 1 {
@@ -120,7 +123,7 @@ func validate(p plan) error {
 	if p.Release.Channel != "preview" && p.Release.Channel != "release-candidate" && p.Release.Channel != "stable" {
 		return errors.New("only preview, release-candidate, or stable releases may be applied")
 	}
-	allowedOperations := map[string]bool{"install": true, "update": true, "backup": true, "restore": true, "export": true, "uninstall": true}
+	allowedOperations := map[string]bool{"install": true, "update": true, "repair": true, "rollback": true, "backup": true, "restore": true, "export": true, "uninstall": true}
 	if !allowedOperations[p.Operation] {
 		return errors.New("the requested deployment operation is unsupported")
 	}

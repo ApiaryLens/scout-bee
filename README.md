@@ -7,12 +7,12 @@ exact ApiaryLens product releases on Windows, Cloudflare, and remote Linux hosts
 Scout Bee and ApiaryLens have independent versions. Scout consumes immutable product
 release manifests and artifacts; it does not build or copy ApiaryLens product source.
 
-## Repository transition status
+## Repository status
 
-This repository is the staged successor to `apps/scout-bee` in the ApiaryLens core
-repository. The core copy remains in place as frozen compatibility input until this
-repository publishes and verifies a replacement release. Do not use both copies to
-ship the same Scout version.
+This is the authoritative Scout Bee source repository. The former embedded
+`apps/scout-bee` implementation has been removed from the ApiaryLens core repository.
+Core publishes product contracts and immutable release artifacts; Scout consumes
+them without copying or deploying product source.
 
 ## End-user packages
 
@@ -24,6 +24,12 @@ source clone. The intended release formats are:
 
 The Windows package does not require Go, Node.js, WSL, or a Linux shell. Source
 dependencies below are for contributors only.
+
+Stable is the default product channel. Preview and release-candidate products appear
+only after explicit selection under **Advanced release channel**. Verified product
+artifacts are cached by checksum in the user's Scout Bee cache for safe resume,
+repair, and rollback. Scout supports install, update, repair, rollback, backup,
+restore, export, and keep-data or remove-data uninstall operations.
 
 ## Contributor build
 

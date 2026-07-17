@@ -125,6 +125,84 @@ func TestValidatePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRepairAndRollbackAreValidLifecycleOperations(t *testing.T) {
+	for _, operation := range []string{"repair", "rollback"} {
+		p := validPlan()
+		p.Operation = operation
+		if err := validate(p); err != nil {
+			t.Fatalf("expected %s to be valid: %v", operation, err)
+		}
+	}
+}
+
+func TestReleaseChannelRequiresAdvancedOptInForPreview(t *testing.T) {
+	original := officialReleaseManifestURLs
+	defer func() { officialReleaseManifestURLs = original }()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		channel := "stable"
+		version := "0.1.0"
+		if r.URL.Path == "/preview.json" {
+			channel = "preview"
+			version = "0.1.0-preview.1"
+		}
+		_, _ = fmt.Fprintf(w, `{"product":"ApiaryLens","productVersion":%q,"channel":%q,"contracts":{"deploymentPlan":1},"artifacts":[]}`, version, channel)
+	}))
+	defer server.Close()
+	officialReleaseManifestURLs = map[string]string{
+		"stable": server.URL + "/stable.json",
+		"preview": server.URL + "/preview.json",
+	}
+	executor := &executor{client: server.Client()}
+
+	stableRequest := httptest.NewRequest(http.MethodGet, "/api/v1/release", nil)
+	stableResponse := httptest.NewRecorder()
+	executor.releaseHTTP(stableResponse, stableRequest)
+	if stableResponse.Code != http.StatusOK || !strings.Contains(stableResponse.Body.String(), `"channel":"stable"`) {
+		t.Fatalf("expected stable default, got %d %s", stableResponse.Code, stableResponse.Body.String())
+	}
+
+	previewRequest := httptest.NewRequest(http.MethodGet, "/api/v1/release?channel=preview", nil)
+	previewResponse := httptest.NewRecorder()
+	executor.releaseHTTP(previewResponse, previewRequest)
+	if previewResponse.Code != http.StatusForbidden {
+		t.Fatalf("expected preview without opt-in to be rejected, got %d", previewResponse.Code)
+	}
+
+	previewRequest = httptest.NewRequest(http.MethodGet, "/api/v1/release?channel=preview&advanced=true", nil)
+	previewResponse = httptest.NewRecorder()
+	executor.releaseHTTP(previewResponse, previewRequest)
+	if previewResponse.Code != http.StatusOK || !strings.Contains(previewResponse.Body.String(), `"channel":"preview"`) {
+		t.Fatalf("expected explicitly opted-in preview, got %d %s", previewResponse.Code, previewResponse.Body.String())
+	}
+}
+
+func TestVerifiedArtifactCacheAvoidsRepeatedDownloads(t *testing.T) {
+	payload := []byte("immutable release payload")
+	digest := sha256.Sum256(payload)
+	downloads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		downloads++
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+	artifact := manifestArtifact{
+		Name: "bundle.tar.gz", Kind: "deployment-bundle", Target: "compose",
+		URL: server.URL, Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(payload)),
+	}
+	executor := &executor{client: server.Client(), cacheDirectory: t.TempDir()}
+	first, err := executor.downloadArtifact(context.Background(), artifact, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := executor.downloadArtifact(context.Background(), artifact, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || downloads != 1 {
+		t.Fatalf("expected one cached download, got paths %q/%q and %d downloads", first, second, downloads)
+	}
+}
 func TestRejectsHTTPCompose(t *testing.T) {
 	p := validPlan()
 	p.Target = "compose-ssh"
