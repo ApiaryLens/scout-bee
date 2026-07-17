@@ -31,6 +31,13 @@ artifacts are cached by checksum in the user's Scout Bee cache for safe resume,
 repair, and rollback. Scout supports install, update, repair, rollback, backup,
 restore, export, and keep-data or remove-data uninstall operations.
 
+After a successful install, update, repair, or rollback, Scout can save a
+secret-free `apiarylens-windows-connection.json`. Import it with
+`ApiaryLens.exe --desktop-profile=<absolute-json-path>`. The Windows application
+verifies the exact HTTPS deployment and release contracts before persisting the
+connection. The file never contains an account password, session, provider token,
+SSH key, deployment secret, or recovery code.
+
 ## Contributor build
 
 Prerequisites:

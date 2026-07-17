@@ -23,6 +23,7 @@ type cloudflareAdapter struct {
 	executor         *executor
 	healthAttempts   int
 	healthRetryDelay time.Duration
+	deployedAddress  string
 }
 
 func (a *cloudflareAdapter) preflight(ctx context.Context, input request) ([]phase, error) {
@@ -367,6 +368,7 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 	if err = a.verifyHealth(ctx, strings.TrimSuffix(address, "/")+"/health", manifest); err != nil {
 		return append(phases, failed("Verify deployment health", err)), err
 	}
+	a.deployedAddress = strings.TrimSuffix(address, "/")
 	phases = append(phases, pass("Verify deployment health", "The deployed service reports the expected product and release version."))
 	return phases, nil
 }

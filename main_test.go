@@ -126,6 +126,40 @@ func TestValidatePlan(t *testing.T) {
 	}
 }
 
+func TestBuildsSecretFreeWindowsConnectionProfile(t *testing.T) {
+	p := validPlan()
+	p.Cloudflare.CustomDomain = "https://hives.example.test"
+	manifest := releaseManifest{
+		ProductVersion: "0.1.0-preview.1",
+		Contracts: manifestContracts{
+			APIVersion: "1.0", Sync: 1, DatabaseMigration: "0004",
+		},
+	}
+	profile := buildWindowsConnectionProfile(p, manifest, p.Cloudflare.CustomDomain, time.Date(2026, 7, 17, 16, 0, 0, 0, time.UTC))
+	if profile == nil || profile.BackendURL != p.Cloudflare.CustomDomain || profile.DeploymentProfile != "cloudflare" ||
+		profile.Compatibility.ProductVersion != manifest.ProductVersion || profile.Compatibility.SyncContract != 1 {
+		t.Fatalf("unexpected Windows connection profile: %+v", profile)
+	}
+	raw, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"password", "token", "privatekey", "secret", "recoverycode"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("connection profile contains forbidden secret-shaped field %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestDoesNotBuildConnectionProfileForDryLifecycleOperations(t *testing.T) {
+	p := validPlan()
+	p.Operation = "backup"
+	if profile := buildWindowsConnectionProfile(p, releaseManifest{}, "https://hives.example.test", time.Now()); profile != nil {
+		t.Fatalf("backup unexpectedly produced a connection profile: %+v", profile)
+	}
+}
+
 func TestRepairAndRollbackAreValidLifecycleOperations(t *testing.T) {
 	for _, operation := range []string{"repair", "rollback"} {
 		p := validPlan()

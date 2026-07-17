@@ -94,6 +94,49 @@ type manifestArtifact struct {
 	Bytes  int64  `json:"bytes"`
 }
 
+type windowsConnectionProfile struct {
+	SchemaVersion       int                  `json:"schemaVersion"`
+	ProfileID           string               `json:"profileId"`
+	DisplayName         string               `json:"displayName"`
+	Mode                string               `json:"mode"`
+	ClientKind          string               `json:"clientKind"`
+	BackendURL          string               `json:"backendUrl"`
+	DeploymentProfile   string               `json:"deploymentProfile"`
+	ProvisioningSource  string               `json:"provisioningSource"`
+	CreatedAt           string               `json:"createdAt"`
+	Compatibility       profileCompatibility `json:"compatibility"`
+}
+
+type profileCompatibility struct {
+	ProductVersion    string `json:"productVersion"`
+	APIContract       string `json:"apiContract"`
+	SyncContract      int    `json:"syncContract"`
+	DatabaseMigration string `json:"databaseMigration"`
+}
+
+func buildWindowsConnectionProfile(p plan, manifest releaseManifest, backendURL string, createdAt time.Time) *windowsConnectionProfile {
+	if !safeHTTPSURL(backendURL) || (p.Operation != "install" && p.Operation != "update" && p.Operation != "repair" && p.Operation != "rollback") {
+		return nil
+	}
+	displayName := "ApiaryLens deployment"
+	deploymentProfile := "compose"
+	if p.Target == "cloudflare" {
+		displayName = p.Cloudflare.WorkerName
+		deploymentProfile = "cloudflare"
+	} else if p.Compose != nil {
+		displayName = p.Compose.ProjectName
+	}
+	return &windowsConnectionProfile{
+		SchemaVersion: 1, ProfileID: p.PlanID, DisplayName: displayName,
+		Mode: "connected", ClientKind: "windows", BackendURL: strings.TrimSuffix(backendURL, "/"),
+		DeploymentProfile: deploymentProfile, ProvisioningSource: "scout", CreatedAt: createdAt.UTC().Format(time.RFC3339Nano),
+		Compatibility: profileCompatibility{
+			ProductVersion: manifest.ProductVersion, APIContract: manifest.Contracts.APIVersion,
+			SyncContract: manifest.Contracts.Sync, DatabaseMigration: manifest.Contracts.DatabaseMigration,
+		},
+	}
+}
+
 var (
 	resourceName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
 	accountID    = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)

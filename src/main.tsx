@@ -36,6 +36,24 @@ type OperationSummary = {
   finishedAt?: string;
 };
 
+type WindowsConnectionProfile = {
+  schemaVersion: 1;
+  profileId: string;
+  displayName: string;
+  mode: "connected";
+  clientKind: "windows";
+  backendUrl: string;
+  deploymentProfile: "cloudflare" | "compose";
+  provisioningSource: "scout";
+  createdAt: string;
+  compatibility: {
+    productVersion: string;
+    apiContract: string;
+    syncContract: number;
+    databaseMigration: string;
+  };
+};
+
 const cloudflareAllowances = [
   ["Workers", "100,000 dynamic requests each day"],
   [
@@ -84,6 +102,8 @@ function App() {
   const [phases, setPhases] = useState<Phase[]>([]);
   const [release, setRelease] = useState<ReleaseIdentity | null>(null);
   const [history, setHistory] = useState<OperationSummary[]>([]);
+  const [connectionProfile, setConnectionProfile] =
+    useState<WindowsConnectionProfile | null>(null);
   const [form, setForm] = useState<Record<string, string>>({
     accountReference: "",
     workerName: "apiarylens-family",
@@ -173,7 +193,10 @@ function App() {
     setBusy(true);
     setError("");
     try {
-      const result = await call<{ phases: Phase[] }>("/api/v1/execute", {
+      const result = await call<{
+        phases: Phase[];
+        connectionProfile?: WindowsConnectionProfile;
+      }>("/api/v1/execute", {
         method: "POST",
         body: JSON.stringify({
           plan,
@@ -195,6 +218,7 @@ function App() {
         }),
       });
       setPhases(result.phases);
+      setConnectionProfile(result.connectionProfile ?? null);
       await refreshHistory();
       setStep(4);
     } catch (caught) {
@@ -248,6 +272,17 @@ function App() {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "apiarylens-deployment.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+  function saveConnectionProfile() {
+    if (!connectionProfile) return;
+    const blob = new Blob([JSON.stringify(connectionProfile, null, 2)], {
+      type: "application/json",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "apiarylens-windows-connection.json";
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -668,8 +703,20 @@ function App() {
                   : "The requested work completed."}
               </h2>
               <p>No secret values were written to the plan or log.</p>
+              {connectionProfile && (
+                <p>
+                  The verified deployment is ready to connect to the ApiaryLens
+                  Windows application. The connection file contains no
+                  credentials.
+                </p>
+              )}
             </div>
             <div className="progress-actions">
+              {connectionProfile && (
+                <button onClick={saveConnectionProfile}>
+                  Save Windows connection file
+                </button>
+              )}
               <button
                 className="secondary"
                 onClick={() => void saveDiagnostics()}

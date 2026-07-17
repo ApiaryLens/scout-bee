@@ -131,6 +131,12 @@ type executor struct {
 	active        map[string]context.CancelFunc
 }
 
+type executionResult struct {
+	Phases            []phase
+	Manifest          *releaseManifest
+	ConnectionBackend string
+}
+
 func newExecutor() *executor {
 	cacheRoot, err := os.UserCacheDir()
 	if err != nil || cacheRoot == "" {
@@ -190,7 +196,8 @@ func (e *executor) executeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	started := time.Now().UTC()
 	_ = e.store.save(operationState{Plan: input.Plan, Mode: input.Mode, Status: "running", StartedAt: started})
-	phases, err := e.run(ctx, input)
+	result, err := e.runDetailed(ctx, input)
+	phases := result.Phases
 	status := "passed"
 	if errors.Is(ctx.Err(), context.Canceled) {
 		status = "canceled"
@@ -203,41 +210,60 @@ func (e *executor) executeHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"phases": phases})
+	response := map[string]any{"phases": phases}
+	if status == "passed" && input.Mode != "dry-run" && result.Manifest != nil {
+		if profile := buildWindowsConnectionProfile(input.Plan, *result.Manifest, result.ConnectionBackend, finished); profile != nil {
+			response["connectionProfile"] = profile
+		}
+	}
+	jsonResponse(w, http.StatusOK, response)
 }
 
 func (e *executor) run(ctx context.Context, input request) ([]phase, error) {
+	result, err := e.runDetailed(ctx, input)
+	return result.Phases, err
+}
+
+func (e *executor) runDetailed(ctx context.Context, input request) (executionResult, error) {
 	if input.Mode != "dry-run" && input.Mode != "apply" && input.Mode != "resume" {
-		return nil, errors.New("mode must be dry-run, apply, or resume")
+		return executionResult{}, errors.New("mode must be dry-run, apply, or resume")
 	}
 	if err := validate(input.Plan); err != nil {
-		return nil, err
+		return executionResult{}, err
 	}
 	phases := []phase{{Name: "Validate deployment plan", State: "passed", Detail: "The versioned plan contains no secret values."}}
 	manifest, err := e.fetchManifest(ctx, input.Plan.Release)
 	if err != nil {
-		return append(phases, failed("Check release identity", err)), err
+		return executionResult{Phases: append(phases, failed("Check release identity", err))}, err
 	}
 	phases = append(phases, phase{Name: "Check release identity", State: "passed", Detail: fmt.Sprintf("Verified ApiaryLens %s and its pinned manifest SHA-256.", manifest.ProductVersion)})
 
 	var adapter targetAdapter
+	var cloudflareTarget *cloudflareAdapter
 	if input.Plan.Target == "cloudflare" {
-		adapter = &cloudflareAdapter{executor: e}
+		cloudflareTarget = &cloudflareAdapter{executor: e}
+		adapter = cloudflareTarget
 	} else {
 		adapter = &composeAdapter{executor: e}
 	}
 	preflightPhases, err := adapter.preflight(ctx, input)
 	phases = append(phases, preflightPhases...)
 	if err != nil || input.Mode == "dry-run" {
-		return phases, err
+		return executionResult{Phases: phases, Manifest: &manifest}, err
 	}
 	if input.Plan.Target == "cloudflare" && input.Secrets["cloudflareApiToken"] == "" {
 		err = errors.New("a Cloudflare API token is required at apply time")
-		return append(phases, failed("Acquire runtime credentials", err)), err
+		return executionResult{Phases: append(phases, failed("Acquire runtime credentials", err)), Manifest: &manifest}, err
 	}
 	applyPhases, err := adapter.apply(ctx, input, manifest)
 	phases = append(phases, applyPhases...)
-	return phases, err
+	backend := ""
+	if err == nil && input.Plan.Target == "compose-ssh" && input.Plan.Compose != nil {
+		backend = input.Plan.Compose.PublicURL
+	} else if err == nil && cloudflareTarget != nil {
+		backend = cloudflareTarget.deployedAddress
+	}
+	return executionResult{Phases: phases, Manifest: &manifest, ConnectionBackend: backend}, err
 }
 
 type targetAdapter interface {
