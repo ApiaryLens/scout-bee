@@ -38,6 +38,15 @@ verifies the exact HTTPS deployment and release contracts before persisting the
 connection. The file never contains an account password, session, provider token,
 SSH key, deployment secret, or recovery code.
 
+The current Windows lifecycle plan target is `windows-client` with architecture
+`x64`. Scout selects the separately pinned `windows-package.json`, Setup executable,
+`RELEASES` metadata, and NuGet package from the exact ApiaryLens product release. It
+verifies every size and SHA-256 plus the manifest-declared Authenticode subject and
+thumbprint before execution. Install, update, repair, rollback, and keep-data
+uninstall are supported by this adapter. Rollback is cache-only; permanent data
+removal requires a separate explicit confirmation. Windows backup, restore, and
+advanced export remain fail-closed until their dedicated implementations land.
+
 ## Contributor build
 
 Prerequisites:

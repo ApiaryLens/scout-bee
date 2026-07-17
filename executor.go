@@ -122,13 +122,15 @@ func (systemRunner) Run(ctx context.Context, spec command, secrets map[string]st
 }
 
 type executor struct {
-	runner        commandRunner
-	client        *http.Client
-	allowLoopback bool
-	store         *operationStore
-	cacheDirectory string
-	activeMu      sync.Mutex
-	active        map[string]context.CancelFunc
+	runner                commandRunner
+	client                *http.Client
+	allowLoopback         bool
+	store                 *operationStore
+	cacheDirectory        string
+	windows               windowsLifecycleSystem
+	windowsStateDirectory string
+	activeMu              sync.Mutex
+	active                map[string]context.CancelFunc
 }
 
 type executionResult struct {
@@ -145,9 +147,9 @@ func newExecutor() *executor {
 	cacheDirectory := filepath.Join(cacheRoot, "ApiaryLens", "ScoutBee", "releases")
 	_ = os.MkdirAll(cacheDirectory, 0o700)
 	return &executor{
-		runner: systemRunner{},
-		store:  newOperationStore(),
-		active: map[string]context.CancelFunc{},
+		runner:         systemRunner{},
+		store:          newOperationStore(),
+		active:         map[string]context.CancelFunc{},
 		cacheDirectory: cacheDirectory,
 		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return errors.New("release downloads may not redirect")
@@ -243,6 +245,8 @@ func (e *executor) runDetailed(ctx context.Context, input request) (executionRes
 	if input.Plan.Target == "cloudflare" {
 		cloudflareTarget = &cloudflareAdapter{executor: e}
 		adapter = cloudflareTarget
+	} else if input.Plan.Target == "windows-client" {
+		adapter = &windowsClientAdapter{executor: e}
 	} else {
 		adapter = &composeAdapter{executor: e}
 	}

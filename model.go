@@ -44,16 +44,21 @@ type compose struct {
 	BackupRetention  int    `json:"backupRetention"`
 }
 
+type windowsClient struct {
+	Architecture string `json:"architecture"`
+}
+
 type plan struct {
-	SchemaVersion       int         `json:"schemaVersion"`
-	PlanID              string      `json:"planId"`
-	CreatedAt           string      `json:"createdAt"`
-	Release             release     `json:"release"`
-	Operation           string      `json:"operation"`
-	KeepDataOnUninstall bool        `json:"keepDataOnUninstall"`
-	Target              string      `json:"target"`
-	Cloudflare          *cloudflare `json:"cloudflare,omitempty"`
-	Compose             *compose    `json:"compose,omitempty"`
+	SchemaVersion       int            `json:"schemaVersion"`
+	PlanID              string         `json:"planId"`
+	CreatedAt           string         `json:"createdAt"`
+	Release             release        `json:"release"`
+	Operation           string         `json:"operation"`
+	KeepDataOnUninstall bool           `json:"keepDataOnUninstall"`
+	Target              string         `json:"target"`
+	Cloudflare          *cloudflare    `json:"cloudflare,omitempty"`
+	Compose             *compose       `json:"compose,omitempty"`
+	WindowsClient       *windowsClient `json:"windowsClient,omitempty"`
 }
 
 type request struct {
@@ -94,17 +99,40 @@ type manifestArtifact struct {
 	Bytes  int64  `json:"bytes"`
 }
 
+type windowsPackageManifest struct {
+	SchemaVersion  int                      `json:"schemaVersion"`
+	Product        string                   `json:"product"`
+	ProductVersion string                   `json:"productVersion"`
+	Architecture   string                   `json:"architecture"`
+	PackageKind    string                   `json:"packageKind"`
+	SourceCommit   string                   `json:"sourceCommit"`
+	Signed         bool                     `json:"signed"`
+	Signature      windowsPackageSignature  `json:"signature"`
+	Artifacts      []windowsPackageArtifact `json:"artifacts"`
+}
+
+type windowsPackageSignature struct {
+	Publisher  string `json:"publisher"`
+	Thumbprint string `json:"thumbprint"`
+}
+
+type windowsPackageArtifact struct {
+	Name   string `json:"name"`
+	Sha256 string `json:"sha256"`
+	Bytes  int64  `json:"bytes"`
+}
+
 type windowsConnectionProfile struct {
-	SchemaVersion       int                  `json:"schemaVersion"`
-	ProfileID           string               `json:"profileId"`
-	DisplayName         string               `json:"displayName"`
-	Mode                string               `json:"mode"`
-	ClientKind          string               `json:"clientKind"`
-	BackendURL          string               `json:"backendUrl"`
-	DeploymentProfile   string               `json:"deploymentProfile"`
-	ProvisioningSource  string               `json:"provisioningSource"`
-	CreatedAt           string               `json:"createdAt"`
-	Compatibility       profileCompatibility `json:"compatibility"`
+	SchemaVersion      int                  `json:"schemaVersion"`
+	ProfileID          string               `json:"profileId"`
+	DisplayName        string               `json:"displayName"`
+	Mode               string               `json:"mode"`
+	ClientKind         string               `json:"clientKind"`
+	BackendURL         string               `json:"backendUrl"`
+	DeploymentProfile  string               `json:"deploymentProfile"`
+	ProvisioningSource string               `json:"provisioningSource"`
+	CreatedAt          string               `json:"createdAt"`
+	Compatibility      profileCompatibility `json:"compatibility"`
 }
 
 type profileCompatibility struct {
@@ -138,11 +166,11 @@ func buildWindowsConnectionProfile(p plan, manifest releaseManifest, backendURL 
 }
 
 var (
-	resourceName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
-	accountID    = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
-	planID       = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
-	remotePath   = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
-	sshName      = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	resourceName      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
+	accountID         = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+	planID            = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
+	remotePath        = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+	sshName           = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	compatibleVersion = regexp.MustCompile(`^0\.1\.\d+(?:-(?:preview|rc)\.\d+)?$`)
 )
 
@@ -179,7 +207,7 @@ func validate(p plan) error {
 	}
 	switch p.Target {
 	case "cloudflare":
-		if p.Cloudflare == nil || p.Compose != nil {
+		if p.Cloudflare == nil || p.Compose != nil || p.WindowsClient != nil {
 			return errors.New("exactly one Cloudflare target is required")
 		}
 		if !accountID.MatchString(p.Cloudflare.AccountReference) || !resourceName.MatchString(p.Cloudflare.WorkerName) || !strings.HasPrefix(p.Cloudflare.WorkerName, "apiarylens-") ||
@@ -193,7 +221,7 @@ func validate(p plan) error {
 			return errors.New("the Cloudflare custom domain must be a complete HTTPS address")
 		}
 	case "compose-ssh":
-		if p.Compose == nil || p.Cloudflare != nil {
+		if p.Compose == nil || p.Cloudflare != nil || p.WindowsClient != nil {
 			return errors.New("exactly one Compose target is required")
 		}
 		if !sshName.MatchString(p.Compose.Host) || !sshName.MatchString(p.Compose.User) || !resourceName.MatchString(p.Compose.ProjectName) {
@@ -209,6 +237,13 @@ func validate(p plan) error {
 		}
 		if !strings.HasPrefix(p.Compose.SSHHostKeySha256, "SHA256:") {
 			return errors.New("a verified SSH host key is required")
+		}
+	case "windows-client":
+		if p.WindowsClient == nil || p.Cloudflare != nil || p.Compose != nil {
+			return errors.New("exactly one Windows client target is required")
+		}
+		if p.WindowsClient.Architecture != "x64" {
+			return errors.New("the initial Windows client lifecycle supports only x64")
 		}
 	default:
 		return errors.New("the deployment target is unsupported")
