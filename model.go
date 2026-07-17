@@ -15,7 +15,7 @@ import (
 // Scout and ApiaryLens are independently versioned. Release builds override
 // scoutVersion from VERSION with -ldflags; supportedProductVersion identifies the
 // exact compatibility baseline consumed by this transitional executor.
-var scoutVersion = "0.1.0-preview.1"
+var scoutVersion = "0.1.0-preview.2"
 
 type release struct {
 	Version        string `json:"version"`

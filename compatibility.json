@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "scoutVersion": "0.1.0-preview.1",
+  "scoutVersion": "0.1.0-preview.2",
   "channel": "preview",
   "contracts": {
     "productManifest": 1,

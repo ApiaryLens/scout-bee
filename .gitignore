@@ -2,10 +2,10 @@ node_modules/
 ui-dist/
 dist/
 coverage/
+.artifacts/
 *.exe
 *.test
 *.out
 .env
 .env.*
 !.env.example
-
