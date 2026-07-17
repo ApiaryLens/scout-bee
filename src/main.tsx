@@ -2,7 +2,7 @@ import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 
-type Target = "cloudflare" | "compose-ssh" | "plan-only";
+type Target = "windows-client" | "cloudflare" | "compose-ssh" | "plan-only";
 type Operation =
   | "install"
   | "update"
@@ -148,16 +148,20 @@ function App() {
               backupRetention: 14,
             },
           }
-        : {
-            cloudflare: {
-              accountReference: form.accountReference,
-              workerName: form.workerName,
-              d1DatabaseName: form.d1DatabaseName,
-              r2BucketName: form.r2BucketName,
-              ...(form.customDomain ? { customDomain: form.customDomain } : {}),
-              costProfile: "family-free-guarded",
-            },
-          }),
+        : target === "windows-client"
+          ? { windowsClient: { architecture: "x64" } }
+          : {
+              cloudflare: {
+                accountReference: form.accountReference,
+                workerName: form.workerName,
+                d1DatabaseName: form.d1DatabaseName,
+                r2BucketName: form.r2BucketName,
+                ...(form.customDomain
+                  ? { customDomain: form.customDomain }
+                  : {}),
+                costProfile: "family-free-guarded",
+              },
+            }),
     }),
     [target, form, operation, keepData, release, productChannel],
   );
@@ -346,6 +350,21 @@ function App() {
           <>
             <section className="targets">
               <button
+                className={target === "windows-client" ? "selected" : ""}
+                onClick={() => {
+                  setTarget("windows-client");
+                  if (["backup", "restore", "export"].includes(operation))
+                    setOperation("install");
+                }}
+              >
+                <b>Windows app</b>
+                <span>Standalone on this computer</span>
+                <p>
+                  Installs or manages the signed ApiaryLens Windows application
+                  without requiring Linux, WSL, Docker, Node, or Go.
+                </p>
+              </button>
+              <button
                 className={target === "cloudflare" ? "selected" : ""}
                 onClick={() => setTarget("cloudflare")}
               >
@@ -432,9 +451,15 @@ function App() {
                 <option value="rollback">
                   Roll back to a selected compatible release
                 </option>
-                <option value="backup">Create and verify a backup</option>
-                <option value="restore">Restore a verified backup</option>
-                <option value="export">Export owned data</option>
+                <option value="backup" disabled={target === "windows-client"}>
+                  Create and verify a backup
+                </option>
+                <option value="restore" disabled={target === "windows-client"}>
+                  Restore a verified backup
+                </option>
+                <option value="export" disabled={target === "windows-client"}>
+                  Export owned data
+                </option>
                 <option value="uninstall">Uninstall ApiaryLens</option>
               </select>
             </label>
@@ -497,6 +522,17 @@ function App() {
                   update={update}
                 />
               </>
+            ) : target === "windows-client" ? (
+              <div className="target-note" role="note">
+                <b>Current-user Windows installation</b>
+                <p>
+                  Scout verifies the exact product manifest, package checksums,
+                  and Authenticode signer before it runs Setup. Updates, repair,
+                  rollback, and keep-data uninstall use the same verified
+                  lifecycle. Backup, restore, and data export remain unavailable
+                  here until their protected headless interface is complete.
+                </p>
+              </div>
             ) : (
               <>
                 <Field
@@ -578,9 +614,11 @@ function App() {
                 <span>
                   {target === "compose-ssh"
                     ? "Your Linux server"
-                    : target === "plan-only"
-                      ? "Export only"
-                      : "Your Cloudflare account"}
+                    : target === "windows-client"
+                      ? "This Windows account"
+                      : target === "plan-only"
+                        ? "Export only"
+                        : "Your Cloudflare account"}
                 </span>
               </div>
               <div>
@@ -590,8 +628,9 @@ function App() {
               <div>
                 <b>Safety</b>
                 <span>
-                  HTTPS, authentication, backup readiness, and versions are
-                  verified before completion.
+                  {target === "windows-client"
+                    ? "Package identity, checksums, Authenticode signer, installed host security, and health are verified before completion."
+                    : "HTTPS, authentication, backup readiness, and versions are verified before completion."}
                 </span>
               </div>
             </div>
@@ -625,24 +664,26 @@ function App() {
                 </label>
               </>
             )}
-            {operation === "install" && target !== "plan-only" && (
-              <label className="runtime-secret">
-                One-time owner setup code
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={16}
-                  value={bootstrapToken}
-                  onChange={(event) => setBootstrapToken(event.target.value)}
-                  placeholder="At least 16 characters; save it until setup is complete"
-                />
-                <small>
-                  You will enter this code once when creating the first family
-                  owner. It stays in memory here and is never added to the plan
-                  or diagnostics.
-                </small>
-              </label>
-            )}
+            {operation === "install" &&
+              target !== "plan-only" &&
+              target !== "windows-client" && (
+                <label className="runtime-secret">
+                  One-time owner setup code
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={16}
+                    value={bootstrapToken}
+                    onChange={(event) => setBootstrapToken(event.target.value)}
+                    placeholder="At least 16 characters; save it until setup is complete"
+                  />
+                  <small>
+                    You will enter this code once when creating the first family
+                    owner. It stays in memory here and is never added to the
+                    plan or diagnostics.
+                  </small>
+                </label>
+              )}
             {operation === "uninstall" && (
               <label className="keep-data">
                 <input
@@ -768,11 +809,16 @@ function App() {
                     (operation === "restore" &&
                       target === "cloudflare" &&
                       form.backupFilePath.length === 0) ||
-                    (operation === "install" && bootstrapToken.length < 16)
+                    (operation === "install" &&
+                      target !== "windows-client" &&
+                      bootstrapToken.length < 16)
                   }
                   onClick={() => void run("apply")}
                 >
-                  Apply deployment
+                  Apply{" "}
+                  {target === "windows-client"
+                    ? "Windows lifecycle"
+                    : "deployment"}
                 </button>
               )}
             </>

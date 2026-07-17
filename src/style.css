@@ -99,8 +99,19 @@ h1 {
 }
 .targets {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 1rem;
+}
+.target-note {
+  grid-column: 1 / -1;
+  padding: 1rem 1.1rem;
+  background: #fffaf0;
+  border: 1px solid #d9d2c4;
+  border-radius: 12px;
+}
+.target-note p {
+  margin: 0.45rem 0 0;
+  line-height: 1.5;
 }
 .targets button {
   min-height: 310px;
