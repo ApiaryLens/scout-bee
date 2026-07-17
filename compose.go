@@ -126,6 +126,7 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 		base64.RawURLEncoding.EncodeToString([]byte(manifest.BuildTime)),
 		base64.RawURLEncoding.EncodeToString([]byte("ApiaryLens@"+manifest.ProductVersion+"+"+shortCommit(manifest.SourceCommit))),
 		strconv.Itoa(compose.BackupRetention),
+		strconv.FormatBool(webFrontendEnabled(compose.IncludeWebFrontend)),
 	)
 	output, err := a.executor.runner.Run(ctx, command{Executable: "ssh", Args: args, Stdin: []byte(composeRemoteScript)}, input.Secrets)
 	if err != nil {
@@ -291,6 +292,7 @@ source_commit=$(decode "${10}")
 build_time=$(decode "${11}")
 artifact_identity=$(decode "${12}")
 backup_retention=${13}
+include_web_frontend=${14}
 prepare_target() {
   if [ -e "$target" ] || [ -L "$target" ]; then
     [ ! -L "$target" ] && [ -d "$target" ] && [ -w "$target" ] || return 73
@@ -362,7 +364,9 @@ case "$operation" in
       chmod 644 "$secrets_dir/bootstrap-token"
       chmod 644 "$secrets_dir/auth-root"
     fi
-    printf 'APIARYLENS_VERSION=%s\nAPIARYLENS_SITE_ADDRESS=%s\nAPIARYLENS_BOOTSTRAP_SECRET_FILE=%s\nAPIARYLENS_AUTH_ROOT_SECRET_FILE=%s\nAPIARYLENS_SOURCE_COMMIT=%s\nAPIARYLENS_BUILD_TIME=%s\nAPIARYLENS_ARTIFACT_IDENTITY=%s\n' "$version" "${public_url#https://}" "$secrets_dir/bootstrap-token" "$secrets_dir/auth-root" "$source_commit" "$build_time" "$artifact_identity" > "$release_dir/docker/.env"
+    caddyfile=Caddyfile.backend-only
+    if [ "$include_web_frontend" = true ]; then caddyfile=Caddyfile; fi
+    printf 'APIARYLENS_VERSION=%s\nAPIARYLENS_SITE_ADDRESS=%s\nAPIARYLENS_BOOTSTRAP_SECRET_FILE=%s\nAPIARYLENS_AUTH_ROOT_SECRET_FILE=%s\nAPIARYLENS_SOURCE_COMMIT=%s\nAPIARYLENS_BUILD_TIME=%s\nAPIARYLENS_ARTIFACT_IDENTITY=%s\nAPIARYLENS_CADDYFILE=%s\n' "$version" "${public_url#https://}" "$secrets_dir/bootstrap-token" "$secrets_dir/auth-root" "$source_commit" "$build_time" "$artifact_identity" "$caddyfile" > "$release_dir/docker/.env"
     chmod 600 "$release_dir/docker/.env"
     ln -sfn "$release_dir" "$current.next"
     if ! docker compose -p "$project" --env-file "$release_dir/docker/.env" -f "$release_dir/docker/compose.yaml" up -d --build --wait; then

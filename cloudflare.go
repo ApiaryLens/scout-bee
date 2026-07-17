@@ -288,20 +288,7 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 	phases = append(phases, pass("Create or reuse private media storage", "The exact named private R2 bucket is ready."))
 
 	configPath := filepath.Join(root, "wrangler.scout.json")
-	config := map[string]any{
-		"name": cf.WorkerName, "main": "worker/index.js", "compatibility_date": "2026-07-15",
-		"compatibility_flags": []string{"nodejs_compat"}, "send_metrics": false,
-		"account_id": cf.AccountReference, "workers_dev": workersDev,
-		"observability": map[string]any{"enabled": false},
-		"vars": map[string]string{
-			"APIARYLENS_SOURCE_COMMIT":     manifest.SourceCommit,
-			"APIARYLENS_BUILD_TIME":        manifest.BuildTime,
-			"APIARYLENS_ARTIFACT_IDENTITY": "ApiaryLens@" + manifest.ProductVersion + "+" + shortCommit(manifest.SourceCommit),
-		},
-		"d1_databases": []map[string]string{{"binding": "DB", "database_name": cf.D1DatabaseName, "database_id": databaseID, "migrations_dir": "worker/migrations"}},
-		"r2_buckets":   []map[string]string{{"binding": "MEDIA", "bucket_name": cf.R2BucketName}},
-		"assets":       map[string]any{"directory": "web", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": []string{"/api/*", "/health"}},
-	}
+	config := cloudflareWranglerConfig(input.Plan, manifest, databaseID, workersDev)
 	if cf.CustomDomain != "" && !workersDev {
 		parsed, _ := url.Parse(cf.CustomDomain)
 		config["routes"] = []map[string]any{{"pattern": parsed.Hostname(), "custom_domain": true}}
@@ -354,10 +341,16 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 	}
 
 	output, err := a.executor.runner.Run(ctx, command{Executable: "wrangler", Args: deployArgs, Directory: root, Environment: environment}, runtimeSecrets)
-	if err != nil {
-		return append(phases, failed("Deploy Worker and PWA assets", err)), err
+	deploymentLabel := "Deploy Worker backend"
+	deploymentDetail := "The exact backend release bundle was deployed without public PWA assets."
+	if webFrontendEnabled(cf.IncludeWebFrontend) {
+		deploymentLabel = "Deploy Worker and PWA assets"
+		deploymentDetail = "The exact backend and web release bundle was deployed."
 	}
-	phases = append(phases, pass("Deploy Worker and PWA assets", "The exact release bundle was deployed."))
+	if err != nil {
+		return append(phases, failed(deploymentLabel, err)), err
+	}
+	phases = append(phases, pass(deploymentLabel, deploymentDetail))
 	address := cf.CustomDomain
 	if address == "" {
 		address = firstWorkersDevURL(output)
@@ -371,6 +364,27 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 	a.deployedAddress = strings.TrimSuffix(address, "/")
 	phases = append(phases, pass("Verify deployment health", "The deployed service reports the expected product and release version."))
 	return phases, nil
+}
+
+func cloudflareWranglerConfig(p plan, manifest releaseManifest, databaseID string, workersDev bool) map[string]any {
+	cf := p.Cloudflare
+	config := map[string]any{
+		"name": cf.WorkerName, "main": "worker/index.js", "compatibility_date": "2026-07-15",
+		"compatibility_flags": []string{"nodejs_compat"}, "send_metrics": false,
+		"account_id": cf.AccountReference, "workers_dev": workersDev,
+		"observability": map[string]any{"enabled": false},
+		"vars": map[string]string{
+			"APIARYLENS_SOURCE_COMMIT":     manifest.SourceCommit,
+			"APIARYLENS_BUILD_TIME":        manifest.BuildTime,
+			"APIARYLENS_ARTIFACT_IDENTITY": "ApiaryLens@" + manifest.ProductVersion + "+" + shortCommit(manifest.SourceCommit),
+		},
+		"d1_databases": []map[string]string{{"binding": "DB", "database_name": cf.D1DatabaseName, "database_id": databaseID, "migrations_dir": "worker/migrations"}},
+		"r2_buckets":   []map[string]string{{"binding": "MEDIA", "bucket_name": cf.R2BucketName}},
+	}
+	if webFrontendEnabled(cf.IncludeWebFrontend) {
+		config["assets"] = map[string]any{"directory": "web", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": []string{"/api/*", "/health"}}
+	}
+	return config
 }
 
 func isWorkersDevAddress(value string) bool {

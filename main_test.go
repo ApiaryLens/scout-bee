@@ -39,6 +39,11 @@ type composePreflightRunner struct {
 	failFolderTest bool
 }
 
+type composeLifecycleRunner struct {
+	commands []command
+	keyLine  string
+}
+
 func (f *keyscanFallbackRunner) Find(string) error { return nil }
 func (f *keyscanFallbackRunner) Run(_ context.Context, spec command, _ map[string]string) (string, error) {
 	f.commands = append(f.commands, spec)
@@ -96,6 +101,33 @@ func (f *composePreflightRunner) Run(_ context.Context, spec command, _ map[stri
 		if f.failFolderTest {
 			return "", errors.New("exit status 1")
 		}
+		return "", nil
+	default:
+		return "", nil
+	}
+}
+
+func (f *composeLifecycleRunner) Find(tool string) error {
+	if tool != "ssh" && tool != "scp" && tool != "ssh-keyscan" {
+		return fmt.Errorf("unexpected external tool %q", tool)
+	}
+	return nil
+}
+
+func (f *composeLifecycleRunner) Run(_ context.Context, spec command, _ map[string]string) (string, error) {
+	f.commands = append(f.commands, spec)
+	switch {
+	case spec.Executable == "ssh-keyscan":
+		return f.keyLine, nil
+	case spec.Executable == "scp":
+		return "", nil
+	case bytes.Contains(spec.Stdin, []byte("docker compose version")):
+		return "x86_64\nDocker Compose version v2.40.3\n", nil
+	case bytes.Equal(spec.Stdin, []byte(composeTargetPreflightScript)):
+		return "", nil
+	case bytes.Equal(spec.Stdin, []byte(composeRemoteScript)):
+		return "ApiaryLens 0.1.0-preview.1 is active and Docker health checks passed.\n", nil
+	case spec.Executable == "ssh" && bytes.Contains(spec.Stdin, []byte("runtime-only")):
 		return "", nil
 	default:
 		return "", nil
@@ -184,7 +216,7 @@ func TestReleaseChannelRequiresAdvancedOptInForPreview(t *testing.T) {
 	}))
 	defer server.Close()
 	officialReleaseManifestURLs = map[string]string{
-		"stable": server.URL + "/stable.json",
+		"stable":  server.URL + "/stable.json",
 		"preview": server.URL + "/preview.json",
 	}
 	executor := &executor{client: server.Client()}
@@ -360,6 +392,97 @@ func TestComposePreflightReportsInstallFolderAccessFailure(t *testing.T) {
 	if err == nil || len(phases) != 4 || phases[3].State != "failed" ||
 		phases[3].Name != "Verify install folder access" || !strings.Contains(err.Error(), "passwordless sudo") {
 		t.Fatalf("expected actionable install-folder failure, err=%v phases=%+v", err, phases)
+	}
+}
+
+func TestComposeRejectsChangedHostKeyBeforeAuthentication(t *testing.T) {
+	runner, p := composePreflightFixture(t, false)
+	p.Compose.SSHHostKeySha256 = "SHA256:" + base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{0xff}, sha256.Size))
+	adapter := &composeAdapter{executor: &executor{runner: runner}}
+	phases, err := adapter.preflight(context.Background(), request{
+		Plan: p, Secrets: map[string]string{"bootstrapToken": "owner-setup-code-long-enough"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match") || len(phases) != 2 || phases[1].Name != "Verify pinned server identity" {
+		t.Fatalf("changed host key did not fail closed: err=%v phases=%+v", err, phases)
+	}
+	if len(runner.commands) != 1 || runner.commands[0].Executable != "ssh-keyscan" {
+		t.Fatalf("changed host key reached authentication or remote execution: %+v", runner.commands)
+	}
+}
+
+func TestComposeWindowsSideLifecycleUsesPinnedArgumentArraysAndExactHealth(t *testing.T) {
+	bundle := []byte("verified compose release bundle")
+	bundleDigest := sha256.Sum256(bundle)
+	key := []byte("clean-linux-target-host-key")
+	keyDigest := sha256.Sum256(key)
+	sourceCommit := strings.Repeat("a", 40)
+	buildTime := "2026-07-17T18:00:00Z"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bundle.tar.gz":
+			_, _ = w.Write(bundle)
+		case "/health":
+			_, _ = fmt.Fprintf(w, `{"status":"ok","product":"ApiaryLens","version":"0.1.0-preview.1","build":{"sourceCommit":%q,"buildTime":%q,"artifactIdentity":"ApiaryLens@0.1.0-preview.1+aaaaaaa"}}`, sourceCommit, buildTime)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	runner := &composeLifecycleRunner{keyLine: "linux.example.test ssh-ed25519 " + base64.StdEncoding.EncodeToString(key) + "\n"}
+	p := validPlan()
+	p.Release.Version = "0.1.0-preview.1"
+	p.Release.Channel = "preview"
+	p.Target = "compose-ssh"
+	p.Cloudflare = nil
+	p.Compose = &compose{
+		Host: "linux.example.test", Port: 22, User: "beekeeper", PublicURL: server.URL,
+		TargetDirectory: "/opt/apiarylens", ProjectName: "apiarylens-family",
+		SSHHostKeySha256: "SHA256:" + base64.RawStdEncoding.EncodeToString(keyDigest[:]), BackupRetention: 14,
+	}
+	manifest := releaseManifest{
+		Product: "ApiaryLens", ProductVersion: "0.1.0-preview.1", Channel: "preview",
+		SourceCommit: sourceCommit, BuildTime: buildTime,
+		Artifacts: []manifestArtifact{{
+			Name: "bundle.tar.gz", Kind: "deployment-bundle", Target: "compose",
+			URL: server.URL + "/bundle.tar.gz", Sha256: hex.EncodeToString(bundleDigest[:]), Bytes: int64(len(bundle)),
+		}},
+	}
+	executor := &executor{client: server.Client(), cacheDirectory: t.TempDir(), runner: runner}
+	adapter := &composeAdapter{executor: executor}
+	input := request{Plan: p, Secrets: map[string]string{"bootstrapToken": "runtime-only-owner-setup-code"}}
+	preflight, err := adapter.preflight(context.Background(), input)
+	if err != nil || len(preflight) != 5 {
+		t.Fatalf("Windows-side Compose preflight failed: err=%v phases=%+v", err, preflight)
+	}
+	phases, err := adapter.apply(context.Background(), input, manifest)
+	if err != nil || len(phases) != 6 {
+		t.Fatalf("Windows-side Compose apply failed: err=%v phases=%+v", err, phases)
+	}
+
+	var scpPinned, remoteLifecycle, protectedSecretStreams int
+	for _, current := range runner.commands {
+		joined := strings.Join(current.Args, " ")
+		if strings.Contains(joined, input.Secrets["bootstrapToken"]) || strings.Contains(joined, input.Secrets["authRootSecret"]) {
+			t.Fatalf("runtime secret leaked into process arguments: %s", joined)
+		}
+		switch current.Executable {
+		case "ssh-keyscan", "ssh", "scp":
+		default:
+			t.Fatalf("lifecycle invoked an unexpected local executable: %s", current.Executable)
+		}
+		if current.Executable == "scp" && strings.Contains(joined, "StrictHostKeyChecking=yes") && strings.Contains(joined, "UserKnownHostsFile=") {
+			scpPinned++
+		}
+		if bytes.Equal(current.Stdin, []byte(composeRemoteScript)) && strings.Contains(joined, " sh -s -- install ") {
+			remoteLifecycle++
+		}
+		if current.Executable == "ssh" && strings.Contains(joined, "umask 077") && strings.Contains(joined, "chmod 600") {
+			protectedSecretStreams++
+		}
+	}
+	if scpPinned != 1 || remoteLifecycle != 1 || protectedSecretStreams != 2 {
+		t.Fatalf("incomplete pinned lifecycle: scp=%d lifecycle=%d secretStreams=%d commands=%+v", scpPinned, remoteLifecycle, protectedSecretStreams, runner.commands)
 	}
 }
 

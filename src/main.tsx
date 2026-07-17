@@ -93,6 +93,7 @@ function App() {
     useState<ProductChannel>("stable");
   const [cloudflareToken, setCloudflareToken] = useState("");
   const [bootstrapToken, setBootstrapToken] = useState("");
+  const [includeWebFrontend, setIncludeWebFrontend] = useState(true);
   const [keepData, setKeepData] = useState(true);
   const [costAcknowledged, setCostAcknowledged] = useState(false);
   const [restoreAcknowledged, setRestoreAcknowledged] = useState(false);
@@ -147,6 +148,7 @@ function App() {
               publicUrl: form.publicUrl,
               sshHostKeySha256: form.sshHostKeySha256,
               backupRetention: 14,
+              includeWebFrontend,
             },
           }
         : target === "windows-client"
@@ -161,10 +163,19 @@ function App() {
                   ? { customDomain: form.customDomain }
                   : {}),
                 costProfile: "family-free-guarded",
+                includeWebFrontend,
               },
             }),
     }),
-    [target, form, operation, keepData, release, productChannel],
+    [
+      target,
+      form,
+      operation,
+      keepData,
+      release,
+      productChannel,
+      includeWebFrontend,
+    ],
   );
   useEffect(() => {
     setRelease(null);
@@ -487,6 +498,30 @@ function App() {
                 </small>
               </details>
             </div>
+            {target !== "windows-client" && (
+              <div
+                className="frontend-selection"
+                role="group"
+                aria-labelledby="frontend-selection-label"
+              >
+                <b id="frontend-selection-label">Deployment content</b>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={includeWebFrontend}
+                    onChange={(event) =>
+                      setIncludeWebFrontend(event.target.checked)
+                    }
+                  />
+                  Include the ApiaryLens web application
+                </label>
+                <small>
+                  Clear this for a backend-only deployment used by connected
+                  Windows or mobile clients. API, authentication, sync, media,
+                  health checks, HTTPS, backup, and recovery remain enabled.
+                </small>
+              </div>
+            )}
             {target === "compose-ssh" ? (
               <>
                 <Field
@@ -639,6 +674,16 @@ function App() {
                 <b>Operation</b>
                 <span>{operation}</span>
               </div>
+              {target !== "windows-client" && (
+                <div>
+                  <b>Deployment content</b>
+                  <span>
+                    {includeWebFrontend
+                      ? "Backend and web application"
+                      : "Backend only"}
+                  </span>
+                </div>
+              )}
               <div>
                 <b>Safety</b>
                 <span>

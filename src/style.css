@@ -254,6 +254,30 @@ h1 {
 .release-selection details label {
   margin-top: 0.8rem;
 }
+.frontend-selection {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+  background: #f8f4e9;
+  border: 1px solid #d8ceb8;
+  border-radius: 10px;
+}
+.frontend-selection label {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  font-weight: 750;
+}
+.frontend-selection input {
+  width: 1.2rem;
+  height: 1.2rem;
+  min-height: auto;
+  padding: 0;
+}
+.frontend-selection small {
+  color: #605b51;
+  line-height: 1.45;
+}
 .form input,
 .form select,
 .runtime-secret input {

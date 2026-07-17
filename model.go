@@ -25,23 +25,32 @@ type release struct {
 }
 
 type cloudflare struct {
-	AccountReference string `json:"accountReference"`
-	WorkerName       string `json:"workerName"`
-	D1DatabaseName   string `json:"d1DatabaseName"`
-	R2BucketName     string `json:"r2BucketName"`
-	CustomDomain     string `json:"customDomain,omitempty"`
-	CostProfile      string `json:"costProfile"`
+	AccountReference   string `json:"accountReference"`
+	WorkerName         string `json:"workerName"`
+	D1DatabaseName     string `json:"d1DatabaseName"`
+	R2BucketName       string `json:"r2BucketName"`
+	CustomDomain       string `json:"customDomain,omitempty"`
+	CostProfile        string `json:"costProfile"`
+	// IncludeWebFrontend is a pointer so plans created before this option
+	// continue to deploy the PWA. An explicit false selects an API-only
+	// deployment without changing the secret-free plan contract.
+	IncludeWebFrontend *bool `json:"includeWebFrontend,omitempty"`
 }
 
 type compose struct {
-	Host             string `json:"host"`
-	Port             int    `json:"port"`
-	User             string `json:"user"`
-	TargetDirectory  string `json:"targetDirectory"`
-	ProjectName      string `json:"projectName"`
-	PublicURL        string `json:"publicUrl"`
-	SSHHostKeySha256 string `json:"sshHostKeySha256"`
-	BackupRetention  int    `json:"backupRetention"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	User               string `json:"user"`
+	TargetDirectory    string `json:"targetDirectory"`
+	ProjectName        string `json:"projectName"`
+	PublicURL          string `json:"publicUrl"`
+	SSHHostKeySha256   string `json:"sshHostKeySha256"`
+	BackupRetention    int    `json:"backupRetention"`
+	IncludeWebFrontend *bool `json:"includeWebFrontend,omitempty"`
+}
+
+func webFrontendEnabled(value *bool) bool {
+	return value == nil || *value
 }
 
 type windowsClient struct {
