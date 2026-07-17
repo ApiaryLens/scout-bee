@@ -13,6 +13,7 @@ type Operation =
   | "export"
   | "uninstall";
 type ProductChannel = "preview" | "release-candidate" | "stable";
+type SSHAuthMethod = "agent" | "private-key" | "password";
 type Phase = {
   name: string;
   state: "waiting" | "running" | "passed" | "failed";
@@ -93,6 +94,10 @@ function App() {
     useState<ProductChannel>("stable");
   const [cloudflareToken, setCloudflareToken] = useState("");
   const [bootstrapToken, setBootstrapToken] = useState("");
+  const [sshAuthMethod, setSSHAuthMethod] = useState<SSHAuthMethod>("agent");
+  const [sshPrivateKeyPath, setSSHPrivateKeyPath] = useState("");
+  const [sshPrivateKeyPassphrase, setSSHPrivateKeyPassphrase] = useState("");
+  const [sshPassword, setSSHPassword] = useState("");
   const [includeWebFrontend, setIncludeWebFrontend] = useState(true);
   const [keepData, setKeepData] = useState(true);
   const [costAcknowledged, setCostAcknowledged] = useState(false);
@@ -223,6 +228,20 @@ function App() {
               : {}),
             ...(operation === "install" && bootstrapToken
               ? { bootstrapToken }
+              : {}),
+            ...(target === "compose-ssh"
+              ? {
+                  sshAuthMethod,
+                  ...(sshAuthMethod === "private-key"
+                    ? {
+                        sshPrivateKeyPath,
+                        ...(sshPrivateKeyPassphrase
+                          ? { sshPrivateKeyPassphrase }
+                          : {}),
+                      }
+                    : {}),
+                  ...(sshAuthMethod === "password" ? { sshPassword } : {}),
+                }
               : {}),
             ...(target === "windows-client" &&
             (operation === "backup" || operation === "restore") &&
@@ -554,6 +573,91 @@ function App() {
                   value={form.sshHostKeySha256}
                   update={update}
                 />
+                <div className="ssh-authentication">
+                  <label>
+                    SSH authentication
+                    <select
+                      value={sshAuthMethod}
+                      onChange={(event) => {
+                        setSSHAuthMethod(event.target.value as SSHAuthMethod);
+                        setSSHPrivateKeyPath("");
+                        setSSHPrivateKeyPassphrase("");
+                        setSSHPassword("");
+                      }}
+                    >
+                      <option value="agent">
+                        OpenSSH agent or default identity
+                      </option>
+                      <option value="private-key">
+                        Explicit private key file
+                      </option>
+                      <option value="password">
+                        Password (Windows Scout only)
+                      </option>
+                    </select>
+                  </label>
+                  {sshAuthMethod === "private-key" && (
+                    <>
+                      <label className="runtime-secret">
+                        Private key file
+                        <input
+                          type="text"
+                          autoComplete="off"
+                          value={sshPrivateKeyPath}
+                          onChange={(event) =>
+                            setSSHPrivateKeyPath(event.target.value)
+                          }
+                          placeholder="C:\\Users\\you\\.ssh\\id_ed25519"
+                        />
+                        <small>
+                          The absolute path is used only for this operation. It
+                          is never added to the plan, history, logs, or
+                          diagnostics.
+                        </small>
+                      </label>
+                      <label className="runtime-secret">
+                        Private key passphrase (optional; Windows Scout only)
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={sshPrivateKeyPassphrase}
+                          onChange={(event) =>
+                            setSSHPrivateKeyPassphrase(event.target.value)
+                          }
+                          placeholder="Leave empty for an unencrypted key"
+                        />
+                        <small>
+                          On Windows, Scout provides this through a protected,
+                          temporary OpenSSH askpass boundary and deletes it when
+                          the operation ends.
+                        </small>
+                      </label>
+                    </>
+                  )}
+                  {sshAuthMethod === "password" && (
+                    <label className="runtime-secret">
+                      SSH password
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        value={sshPassword}
+                        onChange={(event) => setSSHPassword(event.target.value)}
+                        placeholder="Used only during this operation"
+                      />
+                      <small>
+                        On Windows, Scout provides this through a protected,
+                        temporary OpenSSH askpass boundary and deletes it when
+                        the operation ends.
+                      </small>
+                    </label>
+                  )}
+                  {sshAuthMethod === "agent" && (
+                    <small>
+                      Scout uses the current OpenSSH agent and default identity
+                      files without prompting or persisting a credential.
+                    </small>
+                  )}
+                </div>
               </>
             ) : target === "windows-client" ? (
               <>
@@ -681,6 +785,18 @@ function App() {
                     {includeWebFrontend
                       ? "Backend and web application"
                       : "Backend only"}
+                  </span>
+                </div>
+              )}
+              {target === "compose-ssh" && (
+                <div>
+                  <b>SSH authentication</b>
+                  <span>
+                    {sshAuthMethod === "agent"
+                      ? "OpenSSH agent/default identity"
+                      : sshAuthMethod === "private-key"
+                        ? "Runtime-only private key"
+                        : "Runtime-only password"}
                   </span>
                 </div>
               )}
@@ -871,6 +987,12 @@ function App() {
                     (operation === "restore" &&
                       target === "cloudflare" &&
                       form.backupFilePath.length === 0) ||
+                    (target === "compose-ssh" &&
+                      sshAuthMethod === "private-key" &&
+                      sshPrivateKeyPath.length === 0) ||
+                    (target === "compose-ssh" &&
+                      sshAuthMethod === "password" &&
+                      sshPassword.length === 0) ||
                     ((operation === "backup" || operation === "restore") &&
                       target === "windows-client" &&
                       form.windowsArchivePath.length === 0) ||

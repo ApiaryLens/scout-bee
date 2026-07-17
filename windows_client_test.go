@@ -153,6 +153,45 @@ func windowsAdapterFixture(t *testing.T, cacheSetup bool) (*windowsClientAdapter
 	return &windowsClientAdapter{executor: executor}, manifest, input, system
 }
 
+func unsignedWindowsAdapterFixture(t *testing.T) (*windowsClientAdapter, releaseManifest, request, *fakeWindowsLifecycle, windowsPackageManifest) {
+	t.Helper()
+	adapter, manifest, input, system := windowsAdapterFixture(t, true)
+	outer := manifest.Artifacts[0]
+	path := adapter.executor.cachePath(outer)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packageManifest windowsPackageManifest
+	if err = json.Unmarshal(raw, &packageManifest); err != nil {
+		t.Fatal(err)
+	}
+	packageManifest.Signed = false
+	packageManifest.Signature = windowsPackageSignature{}
+	packageManifest.Artifacts[0].Name = "ApiaryLensSetup-UNSIGNED-PREVIEW.exe"
+
+	setupBytes, err := os.ReadFile(adapter.executor.cachePath(manifest.Artifacts[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Artifacts[1].Name = packageManifest.Artifacts[0].Name
+	manifest.Artifacts[1].URL = "https://apiarylens.org/releases/test/ApiaryLensSetup-UNSIGNED-PREVIEW.exe"
+	if err = os.WriteFile(adapter.executor.cachePath(manifest.Artifacts[1]), setupBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err = json.Marshal(packageManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Artifacts[0].Sha256 = testDigest(raw)
+	manifest.Artifacts[0].Bytes = int64(len(raw))
+	if err = os.WriteFile(adapter.executor.cachePath(manifest.Artifacts[0]), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return adapter, manifest, input, system, packageManifest
+}
+
 func TestWindowsClientInstallUsesVerifiedArgumentArraysAndSecretFreeState(t *testing.T) {
 	adapter, manifest, input, system := windowsAdapterFixture(t, true)
 	phases, err := adapter.apply(context.Background(), input, manifest)
@@ -174,6 +213,76 @@ func TestWindowsClientInstallUsesVerifiedArgumentArraysAndSecretFreeState(t *tes
 		if forbidden != "" && strings.Contains(strings.ToLower(string(raw)), strings.ToLower(forbidden)) {
 			t.Fatalf("lifecycle state contains forbidden value %q: %s", forbidden, raw)
 		}
+	}
+}
+
+func TestWindowsClientInstallAcceptsExplicitUnsignedPreviewWithoutClaimingAuthenticode(t *testing.T) {
+	adapter, manifest, input, system, _ := unsignedWindowsAdapterFixture(t)
+	system.signatureErr = errors.New("Authenticode must not run for an explicit unsigned Preview")
+	phases, err := adapter.apply(context.Background(), input, manifest)
+	if err != nil {
+		t.Fatalf("explicit unsigned Preview install failed: %v (%+v)", err, phases)
+	}
+	if len(system.verified) != 0 {
+		t.Fatalf("unsigned Preview unexpectedly invoked Authenticode: %+v", system.verified)
+	}
+	if len(system.runs) != 1 || filepath.Base(system.runs[0].executable) != "ApiaryLensSetup-UNSIGNED-PREVIEW.exe" {
+		t.Fatalf("unexpected unsigned Preview setup execution: %+v", system.runs)
+	}
+	if system.healthCalls != 1 {
+		t.Fatalf("unsigned Preview skipped installed security/health smoke: %d", system.healthCalls)
+	}
+	foundPolicyPhase := false
+	for _, current := range phases {
+		foundPolicyPhase = foundPolicyPhase || current.Name == "Verify explicit unsigned Preview setup" && strings.Contains(current.Detail, "independently pinned") && strings.Contains(current.Detail, "Authenticode was not claimed")
+	}
+	if !foundPolicyPhase {
+		t.Fatalf("unsigned Preview evidence phase is missing or inaccurate: %+v", phases)
+	}
+}
+
+func TestWindowsClientSignedStableStillRequiresAuthenticode(t *testing.T) {
+	adapter, manifest, input, system := windowsAdapterFixture(t, true)
+	manifest.Channel = "stable"
+	input.Plan.Release.Channel = "stable"
+	if _, err := adapter.apply(context.Background(), input, manifest); err != nil {
+		t.Fatalf("signed Stable install failed: %v", err)
+	}
+	if len(system.verified) != 2 {
+		t.Fatalf("signed Stable must verify setup and installed application Authenticode: %+v", system.verified)
+	}
+}
+
+func TestWindowsClientSignedStableFailsClosedOnAuthenticodeError(t *testing.T) {
+	adapter, manifest, input, system := windowsAdapterFixture(t, true)
+	manifest.Channel = "stable"
+	input.Plan.Release.Channel = "stable"
+	system.signatureErr = errors.New("unexpected signer")
+	phases, err := adapter.apply(context.Background(), input, manifest)
+	if err == nil || len(system.runs) != 0 || system.healthCalls != 0 {
+		t.Fatalf("signed Stable Authenticode failure did not stop before execution: err=%v phases=%+v runs=%+v", err, phases, system.runs)
+	}
+}
+
+func TestUnsignedPreviewSkipsAuthenticodeForManagedBackupAndUninstallOnly(t *testing.T) {
+	adapter, manifest, input, system, _ := unsignedWindowsAdapterFixture(t)
+	system.signatureErr = errors.New("Authenticode must not run for an explicit unsigned Preview")
+	if _, err := adapter.apply(context.Background(), input, manifest); err != nil {
+		t.Fatal(err)
+	}
+	system.runs = nil
+	input.Plan.Operation = "backup"
+	input.Secrets = map[string]string{"windowsArchivePath": filepath.Join(t.TempDir(), "family.albackup")}
+	if _, err := adapter.apply(context.Background(), input, manifest); err != nil {
+		t.Fatalf("unsigned Preview managed backup failed: %v", err)
+	}
+	input.Plan.Operation = "uninstall"
+	input.Secrets = nil
+	if _, err := adapter.apply(context.Background(), input, manifest); err != nil {
+		t.Fatalf("unsigned Preview managed uninstall failed: %v", err)
+	}
+	if len(system.verified) != 0 {
+		t.Fatalf("unsigned Preview lifecycle unexpectedly invoked Authenticode: %+v", system.verified)
 	}
 }
 
@@ -338,20 +447,57 @@ func TestWindowsClientRollbackRequiresVerifiedCachedSetup(t *testing.T) {
 	}
 }
 
-func TestWindowsPackageManifestRejectsUnsignedIdentity(t *testing.T) {
-	adapter, manifest, _, _ := windowsAdapterFixture(t, true)
+func TestWindowsPackageManifestRejectsUnsignedRCAndStable(t *testing.T) {
+	adapter, manifest, _, _, _ := unsignedWindowsAdapterFixture(t)
 	artifact := manifest.Artifacts[0]
 	path := adapter.executor.cachePath(artifact)
-	raw, _ := os.ReadFile(path)
-	var packageManifest windowsPackageManifest
-	_ = json.Unmarshal(raw, &packageManifest)
-	packageManifest.Signed = false
-	changed, _ := json.Marshal(packageManifest)
-	_ = os.WriteFile(path, changed, 0o600)
-	artifact.Bytes = int64(len(changed))
-	artifact.Sha256 = testDigest(changed)
-	if _, err := readWindowsPackageManifest(path, manifest, artifact); err == nil || !strings.Contains(err.Error(), "production signer") {
-		t.Fatalf("unsigned package should fail closed: %v", err)
+	for _, channel := range []string{"release-candidate", "stable"} {
+		changedRelease := manifest
+		changedRelease.Channel = channel
+		if _, err := readWindowsPackageManifest(path, changedRelease, artifact); err == nil || !strings.Contains(err.Error(), "only for an explicit product Preview") {
+			t.Fatalf("unsigned %s package should fail closed: %v", channel, err)
+		}
+	}
+}
+
+func TestWindowsPackageManifestRejectsUnexpectedUnsignedSignerState(t *testing.T) {
+	_, manifest, _, _, packageManifest := unsignedWindowsAdapterFixture(t)
+	packageManifest.Signature = windowsPackageSignature{Publisher: "Unexpected Publisher", Thumbprint: strings.Repeat("A", 40)}
+	if _, err := validateWindowsPackageTrust(manifest, packageManifest); err == nil || !strings.Contains(err.Error(), "unexpected signer") {
+		t.Fatalf("unsigned package with signer state should fail closed: %v", err)
+	}
+}
+
+func TestSignedWindowsPackageRejectsMissingSignerState(t *testing.T) {
+	release := releaseManifest{Channel: "stable"}
+	packageManifest := windowsPackageManifest{Signed: true}
+	if _, err := validateWindowsPackageTrust(release, packageManifest); err == nil || !strings.Contains(err.Error(), "valid production signer") {
+		t.Fatalf("signed package without signer metadata should fail closed: %v", err)
+	}
+}
+
+func TestUnsignedWindowsPackageRejectsAmbiguousSetupName(t *testing.T) {
+	_, manifest, _, _, packageManifest := unsignedWindowsAdapterFixture(t)
+	packageManifest.Artifacts[0].Name = "ApiaryLensSetup.exe"
+	if _, _, err := windowsPackageArtifacts(manifest, packageManifest); err == nil || !strings.Contains(err.Error(), "filename is ambiguous") {
+		t.Fatalf("ambiguous unsigned setup name should fail closed: %v", err)
+	}
+}
+
+func TestUnsignedWindowsPackageRequiresEveryArtifactPinnedByProductManifest(t *testing.T) {
+	_, manifest, _, _, packageManifest := unsignedWindowsAdapterFixture(t)
+	for _, missingName := range []string{"ApiaryLensSetup-UNSIGNED-PREVIEW.exe", "RELEASES", "apiarylens-0.1.0-preview.1-full.nupkg"} {
+		changed := manifest
+		changed.Artifacts = append([]manifestArtifact(nil), manifest.Artifacts...)
+		for index, artifact := range changed.Artifacts {
+			if artifact.Name == missingName {
+				changed.Artifacts = append(changed.Artifacts[:index], changed.Artifacts[index+1:]...)
+				break
+			}
+		}
+		if _, _, err := windowsPackageArtifacts(changed, packageManifest); err == nil || !strings.Contains(err.Error(), "not independently pinned") {
+			t.Fatalf("missing product pin for %s should fail closed: %v", missingName, err)
+		}
 	}
 }
 
@@ -372,11 +518,11 @@ func TestResolveInstalledWindowsPathsSelectsExactDirectAppVersion(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	paths, err := resolveInstalledWindowsPaths(root, "0.1.0-preview.1")
+	paths, err := resolveInstalledWindowsPaths(root, "0.1.0-preview.2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(filepath.Dir(paths.Application)) != "app-0.1.0-preview1" {
+	if filepath.Base(filepath.Dir(paths.Application)) != "app-0.1.0-preview2" {
 		t.Fatalf("resolved wrong application directory: %s", paths.Application)
 	}
 	if _, err = resolveInstalledWindowsPaths(root, "0.1.0-preview.3"); err == nil {

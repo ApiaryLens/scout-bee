@@ -235,6 +235,21 @@ h1 {
   gap: 0.45rem;
   font-weight: 750;
 }
+.ssh-authentication {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1rem;
+  background: #fff8df;
+  border: 1px solid #d8c48a;
+  border-radius: 10px;
+}
+.ssh-authentication > small {
+  grid-column: 1 / -1;
+  color: #605b51;
+  line-height: 1.5;
+}
 .release-selection {
   display: grid;
   gap: 0.4rem;
@@ -480,6 +495,9 @@ button:disabled {
     min-height: 0;
   }
   .form {
+    grid-template-columns: 1fr;
+  }
+  .ssh-authentication {
     grid-template-columns: 1fr;
   }
   .cost-guide {

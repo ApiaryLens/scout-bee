@@ -303,7 +303,15 @@ func (a *windowsClientAdapter) apply(ctx context.Context, input request, manifes
 	if err != nil {
 		return []phase{failed("Verify Windows package identity", err)}, err
 	}
-	phases := []phase{pass("Verify Windows package identity", "The package manifest matches the pinned product release, architecture, source commit, package kind, size, checksum, and declared signer.")}
+	unsignedPreview, err := validateWindowsPackageTrust(manifest, packageManifest)
+	if err != nil {
+		return []phase{failed("Verify Windows package trust", err)}, err
+	}
+	identityDetail := "The package manifest matches the pinned product release, architecture, source commit, package kind, size, checksum, and declared Authenticode signer."
+	if unsignedPreview {
+		identityDetail = "The package manifest matches the pinned product release and explicitly declares an unsigned Preview package with no signer identity."
+	}
+	phases := []phase{pass("Verify Windows package identity", identityDetail)}
 	stateStore, err := a.newStateStore()
 	if err != nil {
 		return append(phases, failed("Open Windows lifecycle state", err)), err
@@ -316,10 +324,10 @@ func (a *windowsClientAdapter) apply(ctx context.Context, input request, manifes
 
 	if input.Plan.Operation == "uninstall" {
 		if stateErr == nil && state.Installed && state.ProductVersion != manifest.ProductVersion {
-			err = errors.New("uninstall requires the exact installed product release so the updater signer can be verified")
+			err = errors.New("uninstall requires the exact installed product release so the updater trust policy can be verified")
 			return append(phases, failed("Verify Windows lifecycle transition", err)), err
 		}
-		return a.uninstall(ctx, input, packageManifest, stateStore, state, phases)
+		return a.uninstall(ctx, input, manifest, packageManifest, stateStore, state, phases)
 	}
 	if input.Plan.Operation == "backup" || input.Plan.Operation == "restore" {
 		if state.ProductVersion != manifest.ProductVersion || !strings.EqualFold(state.PackageManifestSha256, packageArtifact.Sha256) || manifest.Contracts.DatabaseMigration == "" {
@@ -366,10 +374,14 @@ func (a *windowsClientAdapter) apply(ctx context.Context, input request, manifes
 	}
 	defer os.RemoveAll(staging)
 	phases = append(phases, pass("Stage verified Windows package", "Scout staged the exact setup, RELEASES metadata, and package payloads from the verified cache using their manifest names."))
-	if err = a.system().VerifyAuthenticode(setupPath, packageManifest.Signature); err != nil {
-		return append(phases, failed("Verify Windows setup signature", err)), err
+	if unsignedPreview {
+		phases = append(phases, pass("Verify explicit unsigned Preview setup", "The exact cached setup uses the required visible unsigned Preview filename and is independently pinned by the official product manifest; Authenticode was not claimed."))
+	} else {
+		if err = a.system().VerifyAuthenticode(setupPath, packageManifest.Signature); err != nil {
+			return append(phases, failed("Verify Windows setup signature", err)), err
+		}
+		phases = append(phases, pass("Verify Windows setup signature", "The exact cached setup has the manifest-declared valid Authenticode signer."))
 	}
-	phases = append(phases, pass("Verify Windows setup signature", "The exact cached setup has the manifest-declared valid Authenticode signer."))
 	commandContext, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if _, err = a.system().Run(commandContext, setupPath, []string{"--silent"}); err != nil {
@@ -380,8 +392,10 @@ func (a *windowsClientAdapter) apply(ctx context.Context, input request, manifes
 	if err != nil {
 		return append(phases, failed("Locate installed Windows client", err)), err
 	}
-	if err = a.system().VerifyAuthenticode(paths.Application, packageManifest.Signature); err != nil {
-		return append(phases, failed("Verify installed Windows application signature", err)), err
+	if !unsignedPreview {
+		if err = a.system().VerifyAuthenticode(paths.Application, packageManifest.Signature); err != nil {
+			return append(phases, failed("Verify installed Windows application signature", err)), err
+		}
 	}
 	checkContext, cancelCheck := context.WithTimeout(ctx, 90*time.Second)
 	defer cancelCheck()
@@ -390,7 +404,11 @@ func (a *windowsClientAdapter) apply(ctx context.Context, input request, manifes
 		err = errors.Join(smokeErr, validateWindowsSmoke(smoke))
 		return append(phases, failed("Verify installed Windows client health", err)), err
 	}
-	phases = append(phases, pass("Verify installed Windows client health", "The installed client retained the expected signer and passed loopback, authorization, renderer sandbox, bridge, and product-shell smoke checks."))
+	healthDetail := "The installed client retained the expected signer and passed loopback, authorization, renderer sandbox, bridge, exact product identity, and product-shell smoke checks."
+	if unsignedPreview {
+		healthDetail = "The explicitly unsigned Preview client passed loopback, authorization, renderer sandbox, bridge, exact product identity, and product-shell smoke checks."
+	}
+	phases = append(phases, pass("Verify installed Windows client health", healthDetail))
 	state = windowsClientState{SchemaVersion: 1, Installed: true, ProductVersion: manifest.ProductVersion, PackageManifestSha256: packageArtifact.Sha256, SetupSha256: setupArtifact.Sha256}
 	if err = stateStore.save(state); err != nil {
 		return append(phases, failed("Record Windows lifecycle state", err)), err
@@ -398,7 +416,7 @@ func (a *windowsClientAdapter) apply(ctx context.Context, input request, manifes
 	return append(phases, pass("Record Windows lifecycle state", "Scout recorded only version and verification hashes; no credentials or local paths were stored.")), nil
 }
 
-func (a *windowsClientAdapter) uninstall(ctx context.Context, input request, packageManifest windowsPackageManifest, stateStore *windowsClientStateStore, state windowsClientState, phases []phase) ([]phase, error) {
+func (a *windowsClientAdapter) uninstall(ctx context.Context, input request, manifest releaseManifest, packageManifest windowsPackageManifest, stateStore *windowsClientStateStore, state windowsClientState, phases []phase) ([]phase, error) {
 	if !input.Plan.KeepDataOnUninstall {
 		err := errors.New("permanent data deletion was planned but not executed")
 		return append(phases, failed("Protect Windows client data", err)), err
@@ -411,8 +429,14 @@ func (a *windowsClientAdapter) uninstall(ctx context.Context, input request, pac
 	if err != nil {
 		return append(phases, failed("Locate Windows uninstaller", err)), err
 	}
-	if err = a.system().VerifyAuthenticode(paths.Updater, packageManifest.Signature); err != nil {
-		return append(phases, failed("Verify Windows uninstaller signature", err)), err
+	unsignedPreview, trustErr := validateWindowsPackageTrust(manifest, packageManifest)
+	if trustErr != nil {
+		return append(phases, failed("Verify Windows package trust", trustErr)), trustErr
+	}
+	if !unsignedPreview {
+		if err = a.system().VerifyAuthenticode(paths.Updater, packageManifest.Signature); err != nil {
+			return append(phases, failed("Verify Windows uninstaller signature", err)), err
+		}
 	}
 	commandContext, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
@@ -424,8 +448,12 @@ func (a *windowsClientAdapter) uninstall(ctx context.Context, input request, pac
 	if err = stateStore.save(state); err != nil {
 		return append(phases, failed("Record keep-data uninstall", err)), err
 	}
+	uninstallDetail := "The signed current-user uninstaller removed application binaries using an argument array."
+	if unsignedPreview {
+		uninstallDetail = "The explicitly unsigned Preview current-user uninstaller removed application binaries using an argument array after exact installed-state verification."
+	}
 	return append(phases,
-		pass("Uninstall Windows application", "The signed current-user uninstaller removed application binaries using an argument array."),
+		pass("Uninstall Windows application", uninstallDetail),
 		pass("Retain Windows client data", "Standalone database, original media, backups, logs, and protected credentials were retained for reinstall or recovery."),
 	), nil
 }
@@ -476,8 +504,14 @@ func (a *windowsClientAdapter) runHeadlessLifecycle(ctx context.Context, input r
 		err = errors.New("the installed Windows application could not be located safely")
 		return append(phases, failed("Locate installed Windows application", err)), err
 	}
-	if err = a.system().VerifyAuthenticode(paths.Application, packageManifest.Signature); err != nil {
-		return append(phases, failed("Verify installed Windows application signature", err)), err
+	unsignedPreview, trustErr := validateWindowsPackageTrust(manifest, packageManifest)
+	if trustErr != nil {
+		return append(phases, failed("Verify Windows package trust", trustErr)), trustErr
+	}
+	if !unsignedPreview {
+		if err = a.system().VerifyAuthenticode(paths.Application, packageManifest.Signature); err != nil {
+			return append(phases, failed("Verify installed Windows application signature", err)), err
+		}
 	}
 	directory, err := os.MkdirTemp("", "apiarylens-windows-lifecycle-")
 	if err != nil {
@@ -601,13 +635,29 @@ func readWindowsPackageManifest(path string, release releaseManifest, outer mani
 	if manifest.SchemaVersion != 1 || manifest.Product != "ApiaryLens for Windows" || manifest.ProductVersion != release.ProductVersion || manifest.Architecture != "x64" || manifest.PackageKind != "squirrel-current-user" || manifest.SourceCommit != release.SourceCommit {
 		return windowsPackageManifest{}, errors.New("the Windows package identity does not match the product release")
 	}
-	if !manifest.Signed || !safePublisher(manifest.Signature.Publisher) || !validThumbprint(manifest.Signature.Thumbprint) {
-		return windowsPackageManifest{}, errors.New("the Windows package does not declare a valid production signer")
+	if _, err = validateWindowsPackageTrust(release, manifest); err != nil {
+		return windowsPackageManifest{}, err
 	}
 	if !cachedArtifactMatches(path, outer) {
 		return windowsPackageManifest{}, errors.New("the cached Windows package manifest no longer matches its release identity")
 	}
 	return manifest, nil
+}
+
+func validateWindowsPackageTrust(release releaseManifest, manifest windowsPackageManifest) (bool, error) {
+	if manifest.Signed {
+		if !safePublisher(manifest.Signature.Publisher) || !validThumbprint(manifest.Signature.Thumbprint) {
+			return false, errors.New("the signed Windows package does not declare a valid production signer")
+		}
+		return false, nil
+	}
+	if release.Channel != "preview" {
+		return false, errors.New("unsigned Windows packages are permitted only for an explicit product Preview")
+	}
+	if manifest.Signature.Publisher != "" || manifest.Signature.Thumbprint != "" {
+		return false, errors.New("the unsigned Preview package declares an unexpected signer identity")
+	}
+	return true, nil
 }
 
 func windowsPackageArtifacts(release releaseManifest, windows windowsPackageManifest) ([]manifestArtifact, manifestArtifact, error) {
@@ -619,17 +669,29 @@ func windowsPackageArtifacts(release releaseManifest, windows windowsPackageMani
 	var setup manifestArtifact
 	hasReleases := false
 	hasPackage := false
+	unsignedPreview, err := validateWindowsPackageTrust(release, windows)
+	if err != nil {
+		return nil, manifestArtifact{}, err
+	}
+	expectedSetupName := "ApiaryLensSetup.exe"
+	if unsignedPreview {
+		expectedSetupName = "ApiaryLensSetup-UNSIGNED-PREVIEW.exe"
+	}
 	for _, packageArtifact := range windows.Artifacts {
 		if packageArtifact.Name == "" || filepath.Base(packageArtifact.Name) != packageArtifact.Name || seen[strings.ToLower(packageArtifact.Name)] || !validSha256(packageArtifact.Sha256) || packageArtifact.Bytes <= 0 {
 			return nil, manifestArtifact{}, errors.New("the Windows package contains an invalid or duplicate artifact identity")
 		}
 		seen[strings.ToLower(packageArtifact.Name)] = true
 		found := false
+		lowerName := strings.ToLower(packageArtifact.Name)
+		if strings.HasPrefix(lowerName, "apiarylenssetup") && strings.HasSuffix(lowerName, ".exe") && packageArtifact.Name != expectedSetupName {
+			return nil, manifestArtifact{}, errors.New("the Windows package setup filename is ambiguous or does not match its signing policy")
+		}
 		for _, artifact := range release.Artifacts {
 			if artifact.Name == packageArtifact.Name && artifact.Kind == "windows-package-artifact" && artifact.Target == windowsTarget && strings.EqualFold(artifact.Sha256, packageArtifact.Sha256) && artifact.Bytes == packageArtifact.Bytes {
 				resolved = append(resolved, artifact)
 				found = true
-				if artifact.Name == "ApiaryLensSetup.exe" {
+				if artifact.Name == expectedSetupName {
 					setup = artifact
 				}
 				if artifact.Name == "RELEASES" {

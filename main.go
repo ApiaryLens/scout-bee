@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -21,6 +22,9 @@ import (
 var ui embed.FS
 
 func main() {
+	if handled, exitCode := runSSHAskpass(os.Stdout); handled {
+		os.Exit(exitCode)
+	}
 	token := randomToken()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

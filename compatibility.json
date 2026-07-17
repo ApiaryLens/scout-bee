@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "scoutVersion": "0.1.0-preview.2",
+  "scoutVersion": "0.1.0-preview.3",
   "channel": "preview",
   "contracts": {
     "productManifest": 1,
@@ -14,7 +14,8 @@
     "minimum": "0.1.0-preview.1",
     "maximumExclusive": "0.2.0"
   },
-  "testedProductVersions": ["0.1.0-preview.1"],
+  "supportedProductVersions": ["0.1.0-preview.2"],
+  "testedProductVersions": ["0.1.0-preview.2"],
   "defaultProductChannel": "stable",
   "nonStableProductChannelsRequireExplicitOptIn": true
 }

@@ -35,7 +35,7 @@ type systemRunner struct{}
 var officialReleaseManifestURLs = map[string]string{
 	"stable":            "https://apiarylens.org/releases/stable/manifest.json",
 	"release-candidate": "https://apiarylens.org/releases/release-candidate/manifest.json",
-	"preview":           "https://apiarylens.org/releases/0.1.0-preview.1/manifest.json",
+	"preview":           "https://apiarylens.org/releases/0.1.0-preview.2/manifest.json",
 }
 
 var allowedExecutables = map[string]bool{
@@ -109,16 +109,40 @@ func (systemRunner) Run(ctx context.Context, spec command, secrets map[string]st
 	if spec.Stdin != nil {
 		cmd.Stdin = strings.NewReader(string(spec.Stdin))
 	}
-	cmd.Env = os.Environ()
-	for key, value := range spec.Environment {
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	cmd.Env = mergedEnvironment(os.Environ(), spec.Environment)
 	out, runErr := cmd.CombinedOutput()
 	clean := redact(string(out), secrets)
 	if runErr != nil {
 		return clean, fmt.Errorf("%s failed: %w", spec.Executable, runErr)
 	}
 	return clean, nil
+}
+
+func mergedEnvironment(base []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+	result := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		key, _, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		replaced := false
+		for override := range overrides {
+			if strings.EqualFold(key, override) {
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			result = append(result, entry)
+		}
+	}
+	for key, value := range overrides {
+		result = append(result, key+"="+value)
+	}
+	return result
 }
 
 type executor struct {
@@ -307,7 +331,7 @@ func (e *executor) fetchManifest(ctx context.Context, expected release) (release
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		return releaseManifest{}, errors.New("release manifest is not valid JSON")
 	}
-	if manifest.Product != "ApiaryLens" || manifest.ProductVersion != expected.Version || manifest.Channel != expected.Channel || manifest.Contracts.DeploymentPlan != 1 {
+	if manifest.Product != "ApiaryLens" || manifest.ProductVersion != expected.Version || manifest.Channel != expected.Channel || manifest.Contracts.DeploymentPlan != 1 || !compatibleProductVersion(manifest.ProductVersion) {
 		return releaseManifest{}, errors.New("release manifest identity or compatibility does not match the plan")
 	}
 	for _, artifact := range manifest.Artifacts {

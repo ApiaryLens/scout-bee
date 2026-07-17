@@ -210,7 +210,7 @@ func TestReleaseChannelRequiresAdvancedOptInForPreview(t *testing.T) {
 		version := "0.1.0"
 		if r.URL.Path == "/preview.json" {
 			channel = "preview"
-			version = "0.1.0-preview.1"
+			version = "0.1.0-preview.2"
 		}
 		_, _ = fmt.Fprintf(w, `{"product":"ApiaryLens","productVersion":%q,"channel":%q,"contracts":{"deploymentPlan":1},"artifacts":[]}`, version, channel)
 	}))
@@ -224,8 +224,8 @@ func TestReleaseChannelRequiresAdvancedOptInForPreview(t *testing.T) {
 	stableRequest := httptest.NewRequest(http.MethodGet, "/api/v1/release", nil)
 	stableResponse := httptest.NewRecorder()
 	executor.releaseHTTP(stableResponse, stableRequest)
-	if stableResponse.Code != http.StatusOK || !strings.Contains(stableResponse.Body.String(), `"channel":"stable"`) {
-		t.Fatalf("expected stable default, got %d %s", stableResponse.Code, stableResponse.Body.String())
+	if stableResponse.Code != http.StatusBadGateway || !strings.Contains(stableResponse.Body.String(), "incompatible") {
+		t.Fatalf("expected unsupported stable default to fail closed, got %d %s", stableResponse.Code, stableResponse.Body.String())
 	}
 
 	previewRequest := httptest.NewRequest(http.MethodGet, "/api/v1/release?channel=preview", nil)
@@ -364,8 +364,8 @@ func TestComposePreflightVerifiesInstallFolderAccess(t *testing.T) {
 	phases, err := adapter.preflight(context.Background(), request{
 		Plan: p, Secrets: map[string]string{"bootstrapToken": "owner-setup-code-long-enough"},
 	})
-	if err != nil || len(phases) != 5 {
-		t.Fatalf("expected five passing Compose phases, err=%v phases=%+v", err, phases)
+	if err != nil || len(phases) != 6 {
+		t.Fatalf("expected six passing Compose phases, err=%v phases=%+v", err, phases)
 	}
 	for _, current := range phases {
 		if current.State != "passed" {
@@ -389,8 +389,8 @@ func TestComposePreflightReportsInstallFolderAccessFailure(t *testing.T) {
 	phases, err := adapter.preflight(context.Background(), request{
 		Plan: p, Secrets: map[string]string{"bootstrapToken": "owner-setup-code-long-enough"},
 	})
-	if err == nil || len(phases) != 4 || phases[3].State != "failed" ||
-		phases[3].Name != "Verify install folder access" || !strings.Contains(err.Error(), "passwordless sudo") {
+	if err == nil || len(phases) != 5 || phases[4].State != "failed" ||
+		phases[4].Name != "Verify install folder access" || !strings.Contains(err.Error(), "passwordless sudo") {
 		t.Fatalf("expected actionable install-folder failure, err=%v phases=%+v", err, phases)
 	}
 }
@@ -452,7 +452,7 @@ func TestComposeWindowsSideLifecycleUsesPinnedArgumentArraysAndExactHealth(t *te
 	adapter := &composeAdapter{executor: executor}
 	input := request{Plan: p, Secrets: map[string]string{"bootstrapToken": "runtime-only-owner-setup-code"}}
 	preflight, err := adapter.preflight(context.Background(), input)
-	if err != nil || len(preflight) != 5 {
+	if err != nil || len(preflight) != 6 {
 		t.Fatalf("Windows-side Compose preflight failed: err=%v phases=%+v", err, preflight)
 	}
 	phases, err := adapter.apply(context.Background(), input, manifest)
@@ -546,7 +546,7 @@ func TestComposeSecretsStreamIntoProtectedRemoteFiles(t *testing.T) {
 	secret := "runtime-only-secret-value"
 	if err := adapter.transferRemoteSecret(context.Background(), request{
 		Plan: p, Secrets: map[string]string{"bootstrapToken": secret},
-	}, "known-hosts", "/tmp/apiarylens-bootstrap-plan", secret); err != nil {
+	}, "known-hosts", sshRuntimeAuth{options: []string{"-o", "BatchMode=yes"}, environment: map[string]string{}, cleanup: func() {}}, "/tmp/apiarylens-bootstrap-plan", secret); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.commands) != 1 {
@@ -623,13 +623,15 @@ func TestPlanJSONUsesVersionedCamelCaseContract(t *testing.T) {
 }
 
 func TestFetchManifestVerifiesPinnedChecksum(t *testing.T) {
-	manifest := []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-rc.1","channel":"release-candidate","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[]}`)
+	manifest := []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.2","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[]}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(manifest) }))
 	defer server.Close()
 	digest := sha256.Sum256(manifest)
 	executor := newExecutor()
 	executor.allowLoopback = true
 	p := validPlan()
+	p.Release.Version = "0.1.0-preview.2"
+	p.Release.Channel = "preview"
 	p.Release.ManifestURL = server.URL
 	p.Release.ManifestSha256 = hex.EncodeToString(digest[:])
 	got, err := executor.fetchManifest(context.Background(), p.Release)
@@ -660,15 +662,17 @@ func TestCloudflareApplyUsesVerifiedBundleAndRuntimeSecret(t *testing.T) {
 		case "/bundle.tar.gz":
 			_, _ = w.Write(artifact)
 		case "/health":
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-rc.1"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-preview.2"})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
-	manifest = []byte(fmt.Sprintf(`{"product":"ApiaryLens","productVersion":"0.1.0-rc.1","channel":"release-candidate","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[{"name":"bundle.tar.gz","kind":"deployment-bundle","target":"cloudflare","url":%q,"sha256":"%s","bytes":%d}]}`, server.URL+"/bundle.tar.gz", hex.EncodeToString(artifactDigest[:]), len(artifact)))
+	manifest = []byte(fmt.Sprintf(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.2","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[{"name":"bundle.tar.gz","kind":"deployment-bundle","target":"cloudflare","url":%q,"sha256":"%s","bytes":%d}]}`, server.URL+"/bundle.tar.gz", hex.EncodeToString(artifactDigest[:]), len(artifact)))
 	manifestDigest := sha256.Sum256(manifest)
 	p := validPlan()
+	p.Release.Version = "0.1.0-preview.2"
+	p.Release.Channel = "preview"
 	p.Release.ManifestURL = server.URL + "/manifest.json"
 	p.Release.ManifestSha256 = hex.EncodeToString(manifestDigest[:])
 	runner := &fakeRunner{}
@@ -748,9 +752,11 @@ func TestCloudflareBackupUsesTemporaryAuthorizationAndWritesVerifiedArchive(t *t
 		}
 	}))
 	defer server.Close()
-	releaseManifest = []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-rc.1","channel":"release-candidate","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[]}`)
+	releaseManifest = []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.2","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[]}`)
 	digest := sha256.Sum256(releaseManifest)
 	p := validPlan()
+	p.Release.Version = "0.1.0-preview.2"
+	p.Release.Channel = "preview"
 	p.Operation = "backup"
 	p.Cloudflare.CustomDomain = server.URL
 	p.Release.ManifestURL = server.URL + "/manifest.json"

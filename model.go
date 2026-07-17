@@ -15,7 +15,7 @@ import (
 // Scout and ApiaryLens are independently versioned. Release builds override
 // scoutVersion from VERSION with -ldflags; supportedProductVersion identifies the
 // exact compatibility baseline consumed by this transitional executor.
-var scoutVersion = "0.1.0-preview.2"
+var scoutVersion = "0.1.0-preview.3"
 
 type release struct {
 	Version        string `json:"version"`
@@ -25,12 +25,12 @@ type release struct {
 }
 
 type cloudflare struct {
-	AccountReference   string `json:"accountReference"`
-	WorkerName         string `json:"workerName"`
-	D1DatabaseName     string `json:"d1DatabaseName"`
-	R2BucketName       string `json:"r2BucketName"`
-	CustomDomain       string `json:"customDomain,omitempty"`
-	CostProfile        string `json:"costProfile"`
+	AccountReference string `json:"accountReference"`
+	WorkerName       string `json:"workerName"`
+	D1DatabaseName   string `json:"d1DatabaseName"`
+	R2BucketName     string `json:"r2BucketName"`
+	CustomDomain     string `json:"customDomain,omitempty"`
+	CostProfile      string `json:"costProfile"`
 	// IncludeWebFrontend is a pointer so plans created before this option
 	// continue to deploy the PWA. An explicit false selects an API-only
 	// deployment without changing the secret-free plan contract.
@@ -46,7 +46,7 @@ type compose struct {
 	PublicURL          string `json:"publicUrl"`
 	SSHHostKeySha256   string `json:"sshHostKeySha256"`
 	BackupRetention    int    `json:"backupRetention"`
-	IncludeWebFrontend *bool `json:"includeWebFrontend,omitempty"`
+	IncludeWebFrontend *bool  `json:"includeWebFrontend,omitempty"`
 }
 
 func webFrontendEnabled(value *bool) bool {
@@ -175,17 +175,12 @@ func buildWindowsConnectionProfile(p plan, manifest releaseManifest, backendURL 
 }
 
 var (
-	resourceName      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
-	accountID         = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
-	planID            = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
-	remotePath        = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
-	sshName           = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	compatibleVersion = regexp.MustCompile(`^0\.1\.\d+(?:-(?:preview|rc)\.\d+)?$`)
+	resourceName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,62}$`)
+	accountID    = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
+	planID       = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
+	remotePath   = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+	sshName      = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
-
-func compatibleProductVersion(version string) bool {
-	return compatibleVersion.MatchString(version)
-}
 
 func validate(p plan) error {
 	if p.SchemaVersion != 1 {

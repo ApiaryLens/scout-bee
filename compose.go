@@ -33,11 +33,17 @@ func (a *composeAdapter) preflight(ctx context.Context, input request) ([]phase,
 	}
 	defer os.Remove(knownHosts)
 	phases = append(phases, pass("Verify pinned server identity", "The live server key matches the SHA-256 fingerprint in the plan."))
+	auth, err := prepareSSHRuntimeAuth(input)
+	if err != nil {
+		return append(phases, failed("Verify SSH authentication input", err)), err
+	}
+	defer auth.cleanup()
+	phases = append(phases, pass("Verify SSH authentication input", "The selected runtime-only SSH authentication method is ready and was not added to the deployment plan."))
 	compose := input.Plan.Compose
 	script := []byte("set -eu\nuname -m\ncommand -v docker >/dev/null\ndocker compose version\ndf -Pk /\ndate -u +%s\n")
 	output, err := a.executor.runner.Run(ctx, command{
-		Executable: "ssh", Args: sshArgs(compose, knownHosts, "sh", "-s"), Stdin: script,
-	}, input.Secrets)
+		Executable: "ssh", Args: sshArgs(compose, knownHosts, auth.options, "sh", "-s"), Stdin: script, Environment: auth.environment,
+	}, sshRedactions(input.Secrets, auth))
 	if err != nil {
 		return append(phases, failed("Verify Linux and Docker prerequisites", err)), err
 	}
@@ -48,8 +54,8 @@ func (a *composeAdapter) preflight(ctx context.Context, input request) ([]phase,
 	phases = append(phases, pass("Verify Linux and Docker prerequisites", "The host is reachable and reports Docker Engine, Compose v2, disk, architecture, and UTC time."))
 	target := base64.RawURLEncoding.EncodeToString([]byte(input.Plan.Compose.TargetDirectory))
 	if _, err = a.executor.runner.Run(ctx, command{
-		Executable: "ssh", Args: sshArgs(compose, knownHosts, "sh", "-s", "--", target), Stdin: []byte(composeTargetPreflightScript),
-	}, input.Secrets); err != nil {
+		Executable: "ssh", Args: sshArgs(compose, knownHosts, auth.options, "sh", "-s", "--", target), Stdin: []byte(composeTargetPreflightScript), Environment: auth.environment,
+	}, sshRedactions(input.Secrets, auth)); err != nil {
 		err = errors.New("the install folder is not writable and the Linux user cannot create it with passwordless sudo")
 		return append(phases, failed("Verify install folder access", err)), err
 	}
@@ -66,6 +72,11 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 		return []phase{failed("Reverify pinned server identity", err)}, err
 	}
 	defer os.Remove(knownHosts)
+	auth, err := prepareSSHRuntimeAuth(input)
+	if err != nil {
+		return []phase{failed("Verify SSH authentication input", err)}, err
+	}
+	defer auth.cleanup()
 	compose := input.Plan.Compose
 	phases := []phase{}
 	remoteBundle := "/tmp/apiarylens-" + input.Plan.PlanID + ".tar.gz"
@@ -87,8 +98,10 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 		}
 		phases = append(phases, pass("Download and verify deployment bundle", "The immutable Compose bundle matches the release manifest."))
 		destination := fmt.Sprintf("%s@%s:%s", compose.User, compose.Host, remoteBundle)
-		args := []string{"-P", strconv.Itoa(compose.Port), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + knownHosts, "--", bundle, destination}
-		if _, err = a.executor.runner.Run(ctx, command{Executable: "scp", Args: args}, input.Secrets); err != nil {
+		args := []string{"-P", strconv.Itoa(compose.Port), "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + knownHosts}
+		args = append(args, auth.options...)
+		args = append(args, "--", bundle, destination)
+		if _, err = a.executor.runner.Run(ctx, command{Executable: "scp", Args: args, Environment: auth.environment}, sshRedactions(input.Secrets, auth)); err != nil {
 			return append(phases, failed("Transfer verified deployment bundle", err)), err
 		}
 		phases = append(phases, pass("Transfer verified deployment bundle", "The checked bundle was transferred over the pinned SSH connection."))
@@ -104,7 +117,7 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 				{input.Secrets["bootstrapToken"], remoteBootstrap, "one-time owner setup protection"},
 				{input.Secrets["authRootSecret"], remoteAuthRoot, "authentication root secret"},
 			} {
-				if secretErr := a.transferRemoteSecret(ctx, input, knownHosts, runtimeSecret.remote, runtimeSecret.value); secretErr != nil {
+				if secretErr := a.transferRemoteSecret(ctx, input, knownHosts, auth, runtimeSecret.remote, runtimeSecret.value); secretErr != nil {
 					return append(phases, failed("Transfer "+runtimeSecret.phase, secretErr)), secretErr
 				}
 				phases = append(phases, pass("Transfer "+runtimeSecret.phase, "The runtime-only secret was streamed into a mode-0600 remote file separately from the release and was not logged."))
@@ -112,7 +125,7 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 		}
 	}
 
-	args := sshArgs(compose, knownHosts, "sh", "-s", "--",
+	args := sshArgs(compose, knownHosts, auth.options, "sh", "-s", "--",
 		input.Plan.Operation,
 		base64.RawURLEncoding.EncodeToString([]byte(compose.TargetDirectory)),
 		base64.RawURLEncoding.EncodeToString([]byte(compose.ProjectName)),
@@ -128,7 +141,7 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 		strconv.Itoa(compose.BackupRetention),
 		strconv.FormatBool(webFrontendEnabled(compose.IncludeWebFrontend)),
 	)
-	output, err := a.executor.runner.Run(ctx, command{Executable: "ssh", Args: args, Stdin: []byte(composeRemoteScript)}, input.Secrets)
+	output, err := a.executor.runner.Run(ctx, command{Executable: "ssh", Args: args, Stdin: []byte(composeRemoteScript), Environment: auth.environment}, sshRedactions(input.Secrets, auth))
 	if err != nil {
 		return append(phases, failed("Apply remote Compose operation", err)), err
 	}
@@ -253,18 +266,31 @@ func (a *composeAdapter) captureKnownHostWithoutAuthentication(ctx context.Conte
 	return path, nil
 }
 
-func sshArgs(target *compose, knownHosts string, remote ...string) []string {
-	args := []string{"-p", strconv.Itoa(target.Port), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=no", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + knownHosts, "--", target.User + "@" + target.Host}
+func sshArgs(target *compose, knownHosts string, authOptions []string, remote ...string) []string {
+	args := []string{"-p", strconv.Itoa(target.Port), "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + knownHosts}
+	args = append(args, authOptions...)
+	args = append(args, "--", target.User+"@"+target.Host)
 	return append(args, remote...)
 }
 
-func (a *composeAdapter) transferRemoteSecret(ctx context.Context, input request, knownHosts, remote, value string) error {
+func (a *composeAdapter) transferRemoteSecret(ctx context.Context, input request, knownHosts string, auth sshRuntimeAuth, remote, value string) error {
 	compose := input.Plan.Compose
-	args := sshArgs(compose, knownHosts,
+	args := sshArgs(compose, knownHosts, auth.options,
 		"sh", "-c", "'umask 077; cat > \"$1\"; chmod 600 \"$1\"'", "sh", remote,
 	)
-	_, err := a.executor.runner.Run(ctx, command{Executable: "ssh", Args: args, Stdin: []byte(value)}, input.Secrets)
+	_, err := a.executor.runner.Run(ctx, command{Executable: "ssh", Args: args, Stdin: []byte(value), Environment: auth.environment}, sshRedactions(input.Secrets, auth))
 	return err
+}
+
+func sshRedactions(secrets map[string]string, auth sshRuntimeAuth) map[string]string {
+	redactions := make(map[string]string, len(secrets)+1)
+	for key, value := range secrets {
+		redactions[key] = value
+	}
+	if path := auth.environment[sshAskpassFileEnvironment]; path != "" {
+		redactions["sshAskpassPath"] = path
+	}
+	return redactions
 }
 
 const composeRemoteScript = `set -eu

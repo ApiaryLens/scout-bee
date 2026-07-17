@@ -27,6 +27,27 @@ if (compatibility.channel !== expectedChannel) {
   );
 }
 
+const supportedProducts = compatibility.supportedProductVersions;
+const testedProducts = compatibility.testedProductVersions;
+if (
+  !Array.isArray(supportedProducts) ||
+  supportedProducts.length === 0 ||
+  !Array.isArray(testedProducts) ||
+  testedProducts.length === 0 ||
+  new Set(supportedProducts).size !== supportedProducts.length ||
+  new Set(testedProducts).size !== testedProducts.length ||
+  supportedProducts.some(
+    (productVersion) =>
+      typeof productVersion !== "string" ||
+      productVersion.length === 0 ||
+      !testedProducts.includes(productVersion),
+  )
+) {
+  throw new Error(
+    "Every supported product version must be a unique, non-empty tested product version.",
+  );
+}
+
 const tag =
   process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : "";
 if (tag && tag !== `v${version}`) {
