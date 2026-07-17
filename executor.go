@@ -207,7 +207,11 @@ func (e *executor) executeHTTP(w http.ResponseWriter, r *http.Request) {
 		status = "failed"
 	}
 	finished := time.Now().UTC()
-	_ = e.store.save(operationState{Plan: input.Plan, Mode: input.Mode, Status: status, Phases: phases, StartedAt: started, FinishedAt: &finished})
+	_ = e.store.save(operationState{
+		Plan: input.Plan, Mode: input.Mode, Status: status, Phases: phases,
+		StartedAt: started, FinishedAt: &finished,
+		Verification: buildReleaseVerification(input.Plan.Release, result.Manifest),
+	})
 	if err != nil && len(phases) == 0 {
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
 		return

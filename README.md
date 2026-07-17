@@ -72,6 +72,20 @@ requests with a per-launch, in-memory value. Deployment plans are secret-free.
 Credentials are accepted only during an operation and must not enter plans, logs,
 diagnostics, caches, or exported repositories.
 
+### Sanitized Windows diagnostics
+
+After a Windows lifecycle operation, the authorized local interface can download a
+JSON diagnostics bundle from `/api/v1/diagnostics/<operation-id>`. The bundle uses
+an allow-listed schema: lifecycle action/status, canonical check codes, Scout and
+product versions, contract versions, and verified manifest/artifact checksums and
+sizes. It never copies the deployment plan or phase details.
+
+Diagnostics exclude credentials, tokens, local user paths, hive records, media,
+artifact names and URLs, command output, and arbitrary stored text. Unknown or
+tampered fields are dropped, and a bundle is refused when verified release metadata
+is unavailable. Review the JSON before sharing it; Scout performs no automatic
+diagnostic upload or telemetry.
+
 Report security issues using [SECURITY.md](SECURITY.md).
 
 ## Ownership boundary

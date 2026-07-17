@@ -12,12 +12,13 @@ import (
 )
 
 type operationState struct {
-	Plan       plan       `json:"plan"`
-	Mode       string     `json:"mode"`
-	Status     string     `json:"status"`
-	Phases     []phase    `json:"phases"`
-	StartedAt  time.Time  `json:"startedAt"`
-	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Plan         plan                         `json:"plan"`
+	Mode         string                       `json:"mode"`
+	Status       string                       `json:"status"`
+	Phases       []phase                      `json:"phases"`
+	StartedAt    time.Time                    `json:"startedAt"`
+	FinishedAt   *time.Time                   `json:"finishedAt,omitempty"`
+	Verification *releaseVerificationMetadata `json:"releaseVerification,omitempty"`
 }
 
 type operationStore struct{ directory string }
@@ -151,24 +152,4 @@ func (e *executor) operationHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, state)
-}
-
-func (e *executor) diagnosticsHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"message": "Method not allowed"})
-		return
-	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/diagnostics/")
-	state, err := e.store.load(id)
-	if err != nil {
-		jsonResponse(w, http.StatusNotFound, map[string]string{"message": "Operation not found"})
-		return
-	}
-	bundle := map[string]any{
-		"product": "ApiaryLens Scout Bee", "scoutVersion": scoutVersion,
-		"generatedAt": time.Now().UTC(), "operation": state,
-		"privacy": "This bundle contains the secret-free plan and sanitized phase output. It contains no runtime credentials.",
-	}
-	w.Header().Set("Content-Disposition", `attachment; filename="apiarylens-scout-diagnostics-`+id+`.json"`)
-	jsonResponse(w, http.StatusOK, bundle)
 }
