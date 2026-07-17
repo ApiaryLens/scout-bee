@@ -112,6 +112,7 @@ function App() {
     customDomain: "",
     backupDestination: "",
     backupFilePath: "",
+    windowsArchivePath: "",
     host: "",
     user: "apiarylens",
     targetDirectory: "/opt/apiarylens",
@@ -211,6 +212,11 @@ function App() {
               : {}),
             ...(operation === "install" && bootstrapToken
               ? { bootstrapToken }
+              : {}),
+            ...(target === "windows-client" &&
+            (operation === "backup" || operation === "restore") &&
+            form.windowsArchivePath
+              ? { windowsArchivePath: form.windowsArchivePath }
               : {}),
             ...(target === "cloudflare" && form.backupDestination
               ? { backupDestination: form.backupDestination }
@@ -351,11 +357,7 @@ function App() {
             <section className="targets">
               <button
                 className={target === "windows-client" ? "selected" : ""}
-                onClick={() => {
-                  setTarget("windows-client");
-                  if (["backup", "restore", "export"].includes(operation))
-                    setOperation("install");
-                }}
+                onClick={() => setTarget("windows-client")}
               >
                 <b>Windows app</b>
                 <span>Standalone on this computer</span>
@@ -451,12 +453,8 @@ function App() {
                 <option value="rollback">
                   Roll back to a selected compatible release
                 </option>
-                <option value="backup" disabled={target === "windows-client"}>
-                  Create and verify a backup
-                </option>
-                <option value="restore" disabled={target === "windows-client"}>
-                  Restore a verified backup
-                </option>
+                <option value="backup">Create and verify a backup</option>
+                <option value="restore">Restore a verified backup</option>
                 <option value="export" disabled={target === "windows-client"}>
                   Export owned data
                 </option>
@@ -523,16 +521,32 @@ function App() {
                 />
               </>
             ) : target === "windows-client" ? (
-              <div className="target-note" role="note">
-                <b>Current-user Windows installation</b>
-                <p>
-                  Scout verifies the exact product manifest, package checksums,
-                  and Authenticode signer before it runs Setup. Updates, repair,
-                  rollback, and keep-data uninstall use the same verified
-                  lifecycle. Backup, restore, and data export remain unavailable
-                  here until their protected headless interface is complete.
-                </p>
-              </div>
+              <>
+                <div className="target-note" role="note">
+                  <b>Current-user Windows installation</b>
+                  <p>
+                    Scout verifies the exact product manifest, package
+                    checksums, and Authenticode signer before lifecycle work.
+                    Backup and restore use protected runtime-only
+                    request/evidence files; the archive path is never added to
+                    the plan, history, logs, or diagnostics. Advanced Windows
+                    data export remains unavailable.
+                  </p>
+                </div>
+                {(operation === "backup" || operation === "restore") && (
+                  <Field
+                    label={
+                      operation === "backup"
+                        ? "New Windows backup file (.albackup)"
+                        : "Existing Windows backup file (.albackup)"
+                    }
+                    name="windowsArchivePath"
+                    value={form.windowsArchivePath}
+                    update={update}
+                    placeholder="C:\\Users\\you\\Documents\\apiarylens-family.albackup"
+                  />
+                )}
+              </>
             ) : (
               <>
                 <Field
@@ -698,13 +712,16 @@ function App() {
             {operation === "restore" && (
               <div className="restore-warning" role="note">
                 <strong>
-                  Restore replaces current server records and media.
+                  Restore replaces current{" "}
+                  {target === "windows-client" ? "Windows" : "server"} records
+                  and media.
                 </strong>
                 <p>
                   Scout first creates a recovery backup, verifies the selected
-                  archive and target compatibility, restores the server, revokes
-                  existing sign-in sessions, and requires a passing health
-                  check.
+                  archive and target compatibility, restores the{" "}
+                  {target === "windows-client" ? "Windows data" : "server"},
+                  revokes existing sign-in sessions, and requires a passing
+                  health check.
                 </p>
                 <label>
                   <input
@@ -809,6 +826,9 @@ function App() {
                     (operation === "restore" &&
                       target === "cloudflare" &&
                       form.backupFilePath.length === 0) ||
+                    ((operation === "backup" || operation === "restore") &&
+                      target === "windows-client" &&
+                      form.windowsArchivePath.length === 0) ||
                     (operation === "install" &&
                       target !== "windows-client" &&
                       bootstrapToken.length < 16)
