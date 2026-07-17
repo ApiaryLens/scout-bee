@@ -18,7 +18,7 @@ func TestEmbeddedCompatibilitySupportsOnlyExplicitlyTestedProducts(t *testing.T)
 	if compatibility.ScoutVersion != scoutVersion {
 		t.Fatalf("embedded Scout identity %q does not match executable %q", compatibility.ScoutVersion, scoutVersion)
 	}
-	if !compatibleProductVersion("0.1.0-preview.2") {
+	if !compatibleProductVersion("0.1.0-preview.3") {
 		t.Fatal("the current tested product version must be supported")
 	}
 	for _, unsupported := range []string{"0.1.0-preview.1", "0.1.1", "0.1.99-rc.1", "0.2.0"} {
@@ -49,7 +49,7 @@ func TestPinnedManifestExecutionRejectsUntestedProductVersion(t *testing.T) {
 }
 
 func TestPinnedManifestExecutionAcceptsExplicitlySupportedProductVersion(t *testing.T) {
-	raw := []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.2","channel":"preview","contracts":{"deploymentPlan":1},"artifacts":[]}`)
+	raw := []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.3","channel":"preview","contracts":{"deploymentPlan":1},"artifacts":[]}`)
 	digest := sha256.Sum256(raw)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(raw)
@@ -58,7 +58,7 @@ func TestPinnedManifestExecutionAcceptsExplicitlySupportedProductVersion(t *test
 
 	executor := &executor{client: server.Client(), allowLoopback: true}
 	manifest, err := executor.fetchManifest(context.Background(), release{
-		Version:        "0.1.0-preview.2",
+		Version:        "0.1.0-preview.3",
 		Channel:        "preview",
 		ManifestURL:    server.URL,
 		ManifestSha256: hex.EncodeToString(digest[:]),
@@ -66,7 +66,7 @@ func TestPinnedManifestExecutionAcceptsExplicitlySupportedProductVersion(t *test
 	if err != nil {
 		t.Fatalf("expected supported pinned manifest to pass: %v", err)
 	}
-	if manifest.ProductVersion != "0.1.0-preview.2" {
+	if manifest.ProductVersion != "0.1.0-preview.3" {
 		t.Fatalf("unexpected supported product identity: %+v", manifest)
 	}
 }

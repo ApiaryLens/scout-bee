@@ -210,7 +210,7 @@ func TestReleaseChannelRequiresAdvancedOptInForPreview(t *testing.T) {
 		version := "0.1.0"
 		if r.URL.Path == "/preview.json" {
 			channel = "preview"
-			version = "0.1.0-preview.2"
+			version = "0.1.0-preview.3"
 		}
 		_, _ = fmt.Fprintf(w, `{"product":"ApiaryLens","productVersion":%q,"channel":%q,"contracts":{"deploymentPlan":1},"artifacts":[]}`, version, channel)
 	}))
@@ -623,14 +623,14 @@ func TestPlanJSONUsesVersionedCamelCaseContract(t *testing.T) {
 }
 
 func TestFetchManifestVerifiesPinnedChecksum(t *testing.T) {
-	manifest := []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.2","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[]}`)
+	manifest := []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.3","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[]}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(manifest) }))
 	defer server.Close()
 	digest := sha256.Sum256(manifest)
 	executor := newExecutor()
 	executor.allowLoopback = true
 	p := validPlan()
-	p.Release.Version = "0.1.0-preview.2"
+	p.Release.Version = "0.1.0-preview.3"
 	p.Release.Channel = "preview"
 	p.Release.ManifestURL = server.URL
 	p.Release.ManifestSha256 = hex.EncodeToString(digest[:])
@@ -662,16 +662,16 @@ func TestCloudflareApplyUsesVerifiedBundleAndRuntimeSecret(t *testing.T) {
 		case "/bundle.tar.gz":
 			_, _ = w.Write(artifact)
 		case "/health":
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-preview.2"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-preview.3"})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
-	manifest = []byte(fmt.Sprintf(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.2","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[{"name":"bundle.tar.gz","kind":"deployment-bundle","target":"cloudflare","url":%q,"sha256":"%s","bytes":%d}]}`, server.URL+"/bundle.tar.gz", hex.EncodeToString(artifactDigest[:]), len(artifact)))
+	manifest = []byte(fmt.Sprintf(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.3","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[{"name":"bundle.tar.gz","kind":"deployment-bundle","target":"cloudflare","url":%q,"sha256":"%s","bytes":%d}]}`, server.URL+"/bundle.tar.gz", hex.EncodeToString(artifactDigest[:]), len(artifact)))
 	manifestDigest := sha256.Sum256(manifest)
 	p := validPlan()
-	p.Release.Version = "0.1.0-preview.2"
+	p.Release.Version = "0.1.0-preview.3"
 	p.Release.Channel = "preview"
 	p.Release.ManifestURL = server.URL + "/manifest.json"
 	p.Release.ManifestSha256 = hex.EncodeToString(manifestDigest[:])
@@ -752,10 +752,10 @@ func TestCloudflareBackupUsesTemporaryAuthorizationAndWritesVerifiedArchive(t *t
 		}
 	}))
 	defer server.Close()
-	releaseManifest = []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.2","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0003","deploymentPlan":1},"artifacts":[]}`)
+	releaseManifest = []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.3","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[]}`)
 	digest := sha256.Sum256(releaseManifest)
 	p := validPlan()
-	p.Release.Version = "0.1.0-preview.2"
+	p.Release.Version = "0.1.0-preview.3"
 	p.Release.Channel = "preview"
 	p.Operation = "backup"
 	p.Cloudflare.CustomDomain = server.URL

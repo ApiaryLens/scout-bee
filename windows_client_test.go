@@ -439,7 +439,7 @@ func TestWindowsClientStateCanBeSafelyReplaced(t *testing.T) {
 func TestWindowsClientRollbackRequiresVerifiedCachedSetup(t *testing.T) {
 	adapter, manifest, input, _ := windowsAdapterFixture(t, false)
 	store, _ := adapter.newStateStore()
-	_ = store.save(windowsClientState{SchemaVersion: 1, Installed: true, ProductVersion: "0.1.0-preview.2", PackageManifestSha256: strings.Repeat("c", 64), SetupSha256: strings.Repeat("d", 64)})
+	_ = store.save(windowsClientState{SchemaVersion: 1, Installed: true, ProductVersion: "0.1.0-preview.3", PackageManifestSha256: strings.Repeat("c", 64), SetupSha256: strings.Repeat("d", 64)})
 	input.Plan.Operation = "rollback"
 	_, err := adapter.apply(context.Background(), input, manifest)
 	if err == nil || !strings.Contains(err.Error(), "rollback package") {
@@ -506,26 +506,26 @@ func TestResolveInstalledWindowsPathsSelectsExactDirectAppVersion(t *testing.T) 
 	if err := os.MkdirAll(filepath.Join(root, "app-0.1.0-preview1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "app-0.1.0-preview2"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "app-0.1.0-preview3"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
 		filepath.Join(root, "Update.exe"),
 		filepath.Join(root, "app-0.1.0-preview1", "ApiaryLens.exe"),
-		filepath.Join(root, "app-0.1.0-preview2", "ApiaryLens.exe"),
+		filepath.Join(root, "app-0.1.0-preview3", "ApiaryLens.exe"),
 	} {
 		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	paths, err := resolveInstalledWindowsPaths(root, "0.1.0-preview.2")
+	paths, err := resolveInstalledWindowsPaths(root, "0.1.0-preview.3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(filepath.Dir(paths.Application)) != "app-0.1.0-preview2" {
+	if filepath.Base(filepath.Dir(paths.Application)) != "app-0.1.0-preview3" {
 		t.Fatalf("resolved wrong application directory: %s", paths.Application)
 	}
-	if _, err = resolveInstalledWindowsPaths(root, "0.1.0-preview.3"); err == nil {
+	if _, err = resolveInstalledWindowsPaths(root, "0.1.0-preview.4"); err == nil {
 		t.Fatal("missing exact installed version should be rejected")
 	}
 }

@@ -35,7 +35,7 @@ type systemRunner struct{}
 var officialReleaseManifestURLs = map[string]string{
 	"stable":            "https://apiarylens.org/releases/stable/manifest.json",
 	"release-candidate": "https://apiarylens.org/releases/release-candidate/manifest.json",
-	"preview":           "https://apiarylens.org/releases/0.1.0-preview.2/manifest.json",
+	"preview":           "https://apiarylens.org/releases/0.1.0-preview.3/manifest.json",
 }
 
 var allowedExecutables = map[string]bool{
