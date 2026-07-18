@@ -26,6 +26,27 @@ describe("Scout release workflow policy wiring", () => {
     expect(workflow).toContain("scout-bee-windows-signing.json");
   });
 
+  it("signs stable bytes through SignPath and retains the signtool verification gate", () => {
+    expect(workflow).toContain("signpath/github-action-submit-signing-request");
+    expect(workflow).toContain("SIGNPATH_API_TOKEN");
+    expect(workflow).toContain("SIGNPATH_ORGANIZATION_ID");
+    expect(workflow).toContain("wait-for-completion: true");
+    expect(workflow).toContain("verify /pa /all");
+    expect(workflow).not.toContain("WINDOWS_SIGNING_CERTIFICATE_BASE64");
+    expect(workflow).not.toContain("signtool sign");
+  });
+
+  it("keeps package-manager submission jobs hard-disabled until GV4", () => {
+    expect(workflow).toContain("winget-submission:");
+    expect(workflow).toContain("chocolatey-submission:");
+    expect(workflow).toContain("GV4 gate:");
+    const disabledGates = workflow.match(/if: \$\{\{ false \}\}/g) ?? [];
+    expect(disabledGates.length).toBeGreaterThanOrEqual(2);
+    expect(workflow).toContain("komac update ApiaryLens.ScoutBee");
+    expect(workflow).toContain("choco push");
+    expect(workflow).not.toContain("wingetcreate");
+  });
+
   it("attests and checksums the signing evidence with both packages", () => {
     expect(workflow).toContain("dist/scout-bee-*-windows-amd64*.exe");
     expect(workflow).toContain("dist/scout-bee-*-linux-amd64.tar.gz");

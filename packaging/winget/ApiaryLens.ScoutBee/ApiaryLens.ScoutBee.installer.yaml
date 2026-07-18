@@ -1,0 +1,28 @@
+# NOT SUBMITTED — submission to microsoft/winget-pkgs is locked until GV4
+# (stable, signed only). Seeded at C2 (Phase P2 Track Release-eng) from the
+# DIST-001 drafts. PLACEHOLDER version/URL/hash/date — the C2 automation
+# rewrites these from the actual GitHub release at submission time.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: ApiaryLens.ScoutBee
+PackageVersion: 0.0.0-DRAFT # PLACEHOLDER — real value written by release automation
+Platform:
+  - Windows.Desktop
+MinimumOSVersion: 10.0.19045.0
+InstallerType: portable # single static Go exe; winget owns install dir, symlink alias, and ARP entry
+Commands:
+  - scout-bee # stable alias regardless of the versioned artifact filename
+UpgradeBehavior: install
+# No RequireExplicitUpgrade: winget's own ARP entry makes portable version
+# detection exact, and Scout disables self-update when its executable path is
+# under the WinGet Packages root (DIST-001 finding 5 / ADR 0024 input),
+# delegating updates to `winget upgrade ApiaryLens.ScoutBee`.
+ReleaseDate: 2026-01-01 # PLACEHOLDER
+Installers:
+  - Architecture: x64
+    # PLACEHOLDER URL — stable GitHub release asset (filename pattern matches
+    # release.yml: scout-bee-<version>-windows-amd64.exe).
+    InstallerUrl: https://github.com/ApiaryLens/scout-bee/releases/download/v0.0.0-DRAFT/scout-bee-0.0.0-DRAFT-windows-amd64.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000 # PLACEHOLDER
+ManifestType: installer
+ManifestVersion: 1.12.0
