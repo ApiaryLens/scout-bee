@@ -243,6 +243,9 @@ func validate(p plan) error {
 			return errors.New("a verified SSH host key is required")
 		}
 	case "windows-client":
+		if !windowsClientEnabled() {
+			return errors.New("the Windows client target is disabled in this build; set SCOUT_BEE_ENABLE_WINDOWS_CLIENT=1 to enable it explicitly")
+		}
 		if p.WindowsClient == nil || p.Cloudflare != nil || p.Compose != nil {
 			return errors.New("exactly one Windows client target is required")
 		}

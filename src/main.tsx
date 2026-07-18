@@ -1,8 +1,8 @@
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import { availableTargets, type Target } from "./targets";
 
-type Target = "windows-client" | "cloudflare" | "compose-ssh" | "plan-only";
 type Operation =
   | "install"
   | "update"
@@ -110,6 +110,9 @@ function App() {
   const [history, setHistory] = useState<OperationSummary[]>([]);
   const [connectionProfile, setConnectionProfile] =
     useState<WindowsConnectionProfile | null>(null);
+  // Defaults to off: the Windows client target stays hidden unless the Scout
+  // server explicitly reports SCOUT_BEE_ENABLE_WINDOWS_CLIENT (ADR 0023).
+  const [windowsClientEnabled, setWindowsClientEnabled] = useState(false);
   const [form, setForm] = useState<Record<string, string>>({
     accountReference: "",
     workerName: "apiarylens-family",
@@ -206,6 +209,13 @@ function App() {
   }
   useEffect(() => {
     void refreshHistory().catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    void call<{ windowsClientEnabled?: boolean }>("/api/v1/status")
+      .then((status) =>
+        setWindowsClientEnabled(status.windowsClientEnabled === true),
+      )
+      .catch(() => undefined);
   }, []);
   const update = (name: string, value: string) =>
     setForm((current) => ({ ...current, [name]: value }));
@@ -385,49 +395,17 @@ function App() {
         {step === 1 && (
           <>
             <section className="targets">
-              <button
-                className={target === "windows-client" ? "selected" : ""}
-                onClick={() => setTarget("windows-client")}
-              >
-                <b>Windows app</b>
-                <span>Standalone on this computer</span>
-                <p>
-                  Installs or manages the signed ApiaryLens Windows application
-                  without requiring Linux, WSL, Docker, Node, or Go.
-                </p>
-              </button>
-              <button
-                className={target === "cloudflare" ? "selected" : ""}
-                onClick={() => setTarget("cloudflare")}
-              >
-                <b>Family Cloud</b>
-                <span>Available across your devices</span>
-                <p>
-                  Runs in your own Cloudflare account. Predictably near-zero
-                  cost for a family apiary, subject to provider allowances.
-                </p>
-              </button>
-              <button
-                className={target === "compose-ssh" ? "selected" : ""}
-                onClick={() => setTarget("compose-ssh")}
-              >
-                <b>My Own Hardware or VM</b>
-                <span>Maximum ownership and portability</span>
-                <p>
-                  Installs the released Docker Compose package on an ordinary
-                  Linux server you control.
-                </p>
-              </button>
-              <button
-                className={target === "plan-only" ? "selected" : ""}
-                onClick={() => setTarget("plan-only")}
-              >
-                <b>Advanced plan</b>
-                <span>Review or automate later</span>
-                <p>
-                  Creates a validated, secret-free plan without applying it.
-                </p>
-              </button>
+              {availableTargets(windowsClientEnabled).map((definition) => (
+                <button
+                  className={target === definition.id ? "selected" : ""}
+                  key={definition.id}
+                  onClick={() => setTarget(definition.id)}
+                >
+                  <b>{definition.title}</b>
+                  <span>{definition.subtitle}</span>
+                  <p>{definition.description}</p>
+                </button>
+              ))}
             </section>
             <section
               className="recovery-status"
