@@ -46,7 +46,14 @@ connection. The file never contains an account password, session, provider token
 SSH key, deployment secret, or recovery code.
 
 The current Windows lifecycle plan target is `windows-client` with architecture
-`x64`. Scout selects the separately pinned `windows-package.json`, Setup executable,
+`x64`. **This target is behind a default-off feature flag** (ADR 0023 ships Scout
+bootstrap-scoped): it is hidden from the guide UI and rejected by deployment-plan
+validation unless the environment variable `SCOUT_BEE_ENABLE_WINDOWS_CLIENT` is
+explicitly set to `1` or `true` before launching Scout. All other values, including
+an unset variable, leave the target disabled. The adapter code and its tests remain
+in the repository per the flag-not-delete rule in Design v2 §8.
+
+When the flag is enabled, Scout selects the separately pinned `windows-package.json`, Setup executable,
 `RELEASES` metadata, and NuGet package from the exact ApiaryLens product release. It
 verifies every size and SHA-256 plus the manifest-declared Authenticode subject and
 thumbprint before execution. Install, update, repair, rollback, backup, restore, and

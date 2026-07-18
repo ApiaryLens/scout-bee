@@ -36,7 +36,7 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/status", authorized(token, func(w http.ResponseWriter, _ *http.Request) {
-		jsonResponse(w, http.StatusOK, map[string]any{"status": "ready", "version": scoutVersion})
+		jsonResponse(w, http.StatusOK, statusPayload())
 	}))
 	executor := newExecutor()
 	mux.HandleFunc("/api/v1/release", authorized(token, executor.releaseHTTP))
@@ -55,6 +55,17 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 	log.Fatal(server.Serve(listener))
+}
+
+// statusPayload reports launch readiness plus the capabilities the guide UI
+// may offer. windowsClientEnabled defaults to false (ADR 0023 bootstrap scope);
+// the UI hides the Windows client target unless the flag is explicitly set.
+func statusPayload() map[string]any {
+	return map[string]any{
+		"status":               "ready",
+		"version":              scoutVersion,
+		"windowsClientEnabled": windowsClientEnabled(),
+	}
 }
 
 func authorized(token string, next http.HandlerFunc) http.HandlerFunc {
