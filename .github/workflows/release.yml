@@ -57,37 +57,70 @@ jobs:
         shell: pwsh
         env:
           SCOUT_ALLOW_UNSIGNED_PREVIEW: ${{ inputs.allow_unsigned_preview && 'true' || 'false' }}
-          SCOUT_WINDOWS_SIGNING_AVAILABLE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 != '' && secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD != '' }}
+          # ADR 0026: Authenticode signing is performed by SignPath Foundation
+          # through a submit/wait round trip, not by locally held PFX material.
+          # Signing counts as "available" only when the SignPath wiring is fully
+          # configured (API token secret plus organization-id repository
+          # variable). When it is not, scripts/release-policy.mjs fails closed:
+          # stable and RC releases hard-fail, and previews require the explicit
+          # allow_unsigned_preview opt-in to ship labeled unsigned bytes.
+          SCOUT_WINDOWS_SIGNING_AVAILABLE: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
         run: node scripts/release-policy.mjs
 
-      - name: Authenticode-sign and timestamp Windows executable
+      # ADR 0026 (C1): SignPath Foundation signing round trip. The three steps
+      # below replace the previous PFX signtool-sign step and run only on the
+      # 'signed' policy branch; GV3 unsigned previews never touch SignPath.
+      #
+      # PLACEHOLDER slugs: the SignPath organization and project do not exist
+      # yet. Per ADR 0026 the GV3 labeled unsigned preview ships BEFORE the
+      # SignPath application is submitted, so until the application is approved
+      # leave SIGNPATH_API_TOKEN (secret) and SIGNPATH_ORGANIZATION_ID
+      # (repository variable) unset: the policy step then resolves signing as
+      # unavailable and stable releases fail closed instead of shipping
+      # unsigned. Before the first signed run the SignPath GitHub App must be
+      # installed on this repository and the slugs below replaced with the real
+      # values from the approved SignPath project.
+      - name: Upload unsigned Windows executable for signing
+        if: steps.release-policy.outputs.signing_mode == 'signed'
+        id: unsigned-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          # Deliberately NOT named scout-bee-*: the publish job downloads with
+          # `pattern: scout-bee-*` and merge-multiple, and this unsigned
+          # signing input must never be able to clobber the signed bytes.
+          name: signing-input-windows-amd64
+          path: dist/scout-bee-*-windows-amd64.exe
+          if-no-files-found: error
+
+      - name: Submit SignPath signing request and wait for signed bytes
+        if: steps.release-policy.outputs.signing_mode == 'signed'
+        uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd # v2.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: scout-bee # PLACEHOLDER - real slug assigned when the SignPath application is approved (ADR 0026)
+          signing-policy-slug: release-signing # PLACEHOLDER - release policy with per-release manual approval (ADR 0026)
+          github-artifact-id: ${{ steps.unsigned-artifact.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist/signpath-signed
+
+      - name: Replace executable with signed bytes and verify Authenticode
         if: steps.release-policy.outputs.signing_mode == 'signed'
         shell: pwsh
-        env:
-          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
-          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
-          $certificatePath = Join-Path $env:RUNNER_TEMP 'scout-bee-signing.pfx'
-          try {
-            [IO.File]::WriteAllBytes(
-              $certificatePath,
-              [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE_BASE64)
-            )
-            $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
-              -Filter signtool.exe -Recurse |
-              Where-Object FullName -Match '\\x64\\signtool\.exe$' |
-              Sort-Object FullName -Descending |
-              Select-Object -First 1 -ExpandProperty FullName
-            if (-not $signTool) { throw 'signtool.exe was not found on the release runner.' }
-            $artifact = Get-ChildItem dist\scout-bee-*-windows-amd64.exe -File -ErrorAction Stop
-            & $signTool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
-              /f $certificatePath /p $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD $artifact.FullName
-            if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed.' }
-            & $signTool verify /pa /all $artifact.FullName
-            if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed.' }
-          } finally {
-            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
-          }
+          $artifact = Get-ChildItem dist\scout-bee-*-windows-amd64.exe -File -ErrorAction Stop
+          $signed = Join-Path 'dist/signpath-signed' $artifact.Name
+          if (-not (Test-Path -LiteralPath $signed)) { throw "SignPath did not return $($artifact.Name)." }
+          Copy-Item -LiteralPath $signed -Destination $artifact.FullName -Force
+          Remove-Item dist/signpath-signed -Recurse -Force
+          $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter signtool.exe -Recurse |
+            Where-Object FullName -Match '\\x64\\signtool\.exe$' |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signTool) { throw 'signtool.exe was not found on the release runner.' }
+          & $signTool verify /pa /all $artifact.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed.' }
 
       - name: Mark explicitly unsigned Preview executable
         if: steps.release-policy.outputs.signing_mode == 'unsigned-preview'
@@ -231,3 +264,93 @@ jobs:
               --verify-tag --generate-notes \
               --title "Scout Bee $version"
           fi
+
+  # ---------------------------------------------------------------------------
+  # C2 package-manager submission jobs - DISABLED until GV4.
+  # Both jobs are hard-gated with `if: false`: they cannot run on any trigger
+  # until a maintainer deliberately edits this file after the owner passes the
+  # GV4 stable gate (signed artifacts + conformance evidence). Stable versions
+  # only; previews and RCs are never submitted to any package manager.
+  # ---------------------------------------------------------------------------
+
+  winget-submission:
+    # GV4 gate: submission to microsoft/winget-pkgs is locked until GV4.
+    # Flipping `if: false` is the explicit enable switch and is an owner
+    # decision recorded in the platform plan. Untested automation: this job has
+    # never run; validate it on a fork before the first enabled run.
+    if: ${{ false }}
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out immutable revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Submit winget manifest update with komac
+        env:
+          # komac requires a CLASSIC personal access token with `public_repo`
+          # scope on an account that owns a fork of microsoft/winget-pkgs.
+          # Fine-grained PATs and GitHub App installation tokens are NOT
+          # supported for komac's cross-repo PR flow (DIST-001 finding 3), so
+          # this secret is a recorded exception to the GitHub-App-token rule.
+          KOMAC_PAT: ${{ secrets.WINGET_SUBMISSION_PAT }}
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          case "$version" in
+            *-*) echo "Refusing to submit non-stable version $version to winget." >&2; exit 1 ;;
+          esac
+          curl -fsSL -o komac.deb \
+            https://github.com/russellbanks/Komac/releases/download/v2.16.0/komac_2.16.0-1_amd64.deb
+          sudo dpkg -i komac.deb
+          # NOTE: the FIRST version of ApiaryLens.ScoutBee must be submitted as
+          # a manual PR to microsoft/winget-pkgs (see packaging/winget/); komac
+          # can only update a package that already exists in the repository.
+          komac update ApiaryLens.ScoutBee \
+            --version "$version" \
+            --urls "https://github.com/ApiaryLens/scout-bee/releases/download/v${version}/scout-bee-${version}-windows-amd64.exe" \
+            --submit \
+            --token "$KOMAC_PAT"
+
+  chocolatey-submission:
+    # GV4 gate: pushing to the Chocolatey Community Repository is locked until
+    # GV4. Flipping `if: false` is the explicit enable switch and is an owner
+    # decision recorded in the platform plan. First-party `choco pack` and
+    # `choco push` only - chocolatey-AU is GPL-2.0 and is deliberately not used
+    # (DIST-002 finding 3). Untested automation: this job has never run;
+    # validate it on a fork before the first enabled run.
+    if: ${{ false }}
+    needs: publish
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out immutable revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Pack and push Chocolatey package from published release bytes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: |
+          $version = (Get-Content -Raw VERSION).Trim()
+          if ($version -like '*-*') { throw "Refusing to submit non-stable version $version to Chocolatey." }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          gh release download "v$version" --pattern SHA256SUMS --dir dist
+          $line = Select-String -Path dist/SHA256SUMS -Pattern ([regex]::Escape("scout-bee-$version-windows-amd64.exe")) |
+            Select-Object -First 1
+          if (-not $line) { throw 'Release SHA256SUMS does not list the Windows executable.' }
+          $sha256 = ($line.Line -split '\s+')[0]
+          $staging = 'dist/choco/scout-bee'
+          New-Item -ItemType Directory -Force $staging | Out-Null
+          Copy-Item packaging/chocolatey/scout-bee/* $staging -Recurse -Force
+          foreach ($file in @("$staging/scout-bee.nuspec", "$staging/tools/chocolateyinstall.ps1")) {
+            (Get-Content -Raw $file).Replace('{VERSION}', $version).Replace('{SHA256_EXE_AMD64}', $sha256) |
+              Set-Content -NoNewline -Path $file
+          }
+          choco pack "$staging/scout-bee.nuspec" --output-directory dist/choco
+          $nupkg = Get-ChildItem dist/choco/*.nupkg -File -ErrorAction Stop
+          choco push $nupkg.FullName --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY

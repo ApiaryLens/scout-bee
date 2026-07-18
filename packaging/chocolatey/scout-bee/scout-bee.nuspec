@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NOT PACKED FOR RELEASE, NOT PUSHED. Submission locked until GV4 per the
+     platform plan. Seeded at C2 (Phase P2 Track Release-eng) from the
+     DIST-002 drafts; {VERSION} is substituted by the release workflow. -->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>scout-bee</id>
+    <version>{VERSION}</version><!-- placeholder, e.g. 1.0.0 -->
+    <packageSourceUrl>https://github.com/ApiaryLens/scout-bee/tree/main/packaging/chocolatey</packageSourceUrl>
+    <owners>ApiaryLens</owners>
+    <title>Scout Bee</title>
+    <authors>ApiaryLens contributors</authors>
+    <projectUrl>https://github.com/ApiaryLens/scout-bee</projectUrl>
+    <!-- Chocolatey CLI rejects NuGet <license> elements (CHCU0002); licenseUrl
+         is the supported form. License: Apache-2.0. -->
+    <licenseUrl>https://github.com/ApiaryLens/scout-bee/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/ApiaryLens/scout-bee</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/ApiaryLens/scout-bee/issues</bugTrackerUrl>
+    <releaseNotes>https://github.com/ApiaryLens/scout-bee/releases/tag/v{VERSION}</releaseNotes>
+    <tags>scout-bee apiarylens deployment lifecycle portable</tags>
+    <summary>Lifecycle companion for ApiaryLens deployments</summary>
+    <description><![CDATA[
+Scout Bee is the open-source (Apache-2.0) lifecycle companion for ApiaryLens:
+a single portable executable with an embedded guided UI that helps a family
+install, verify, back up, and update their ApiaryLens deployment. No Go,
+Node, WSL, Docker, or Linux shell required.
+
+This is a portable package: the executable is placed in the Chocolatey tools
+directory and exposed on PATH as `scout-bee` via a shim. When installed
+through Chocolatey, Scout Bee's own self-update is suppressed; use
+`choco upgrade scout-bee` instead.
+]]></description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

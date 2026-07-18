@@ -1,0 +1,31 @@
+# NOT SUBMITTED — submission to microsoft/winget-pkgs is locked until GV4.
+# Seeded at C2 (Phase P2 Track Release-eng) from the DIST-001 drafts.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: ApiaryLens.ScoutBee
+PackageVersion: 0.0.0-DRAFT # PLACEHOLDER
+PackageLocale: en-US
+Publisher: ApiaryLens
+PublisherUrl: https://apiarylens.org
+PublisherSupportUrl: https://github.com/ApiaryLens/scout-bee/issues
+PackageName: Scout Bee
+PackageUrl: https://github.com/ApiaryLens/scout-bee
+License: Apache-2.0
+LicenseUrl: https://github.com/ApiaryLens/scout-bee/blob/main/LICENSE
+Copyright: Copyright (c) ApiaryLens contributors
+ShortDescription: Lifecycle companion for ApiaryLens - guided install, verify, update, backup, and recovery.
+Description: |-
+  Scout Bee is the ApiaryLens lifecycle companion: a single portable
+  executable with an embedded guide UI that discovers, verifies (SHA-256 and
+  attestation), installs, updates, backs up, and recovers ApiaryLens
+  deployments. No Go, Node, WSL, Docker, or Linux shell required.
+Moniker: scout-bee
+Tags:
+  - apiarylens
+  - beekeeping
+  - deployment
+  - lifecycle
+  - self-hosted
+ReleaseNotesUrl: https://github.com/ApiaryLens/scout-bee/releases/tag/v0.0.0-DRAFT # PLACEHOLDER
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0
