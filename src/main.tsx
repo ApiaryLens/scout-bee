@@ -539,6 +539,12 @@ function App() {
     (lastRunMode === "apply" || lastRunMode === "resume") &&
     phases.length > 0 &&
     !runFailed;
+  // A successful preflight (dry-run) lands on step 4 to show its results but
+  // must NOT be treated as done: the real "apply" still has to run. Surface an
+  // Apply button on step 4 in that state so a passed preflight has a forward
+  // path instead of a dead Next button.
+  const preflightPassed =
+    lastRunMode === "dry-run" && phases.length > 0 && !runFailed;
   // Health evidence may only be claimed when a health-verification phase
   // actually passed in this run (codex P2 finding): backup, export, and
   // uninstall never establish it.
@@ -565,6 +571,27 @@ function App() {
   const ownerCodeMissing =
     ownerCodeNeeded &&
     !ownerCodeReady(target, ownerCodeMode, bootstrapToken, ownerCodeSaved);
+  // Shared gate for the "apply" action, used on both the Review step and the
+  // step-4 preflight-results screen so they can never disagree.
+  const applyDisabled =
+    busy ||
+    !release ||
+    ownerCodeMissing ||
+    (target === "cloudflare" && !costAcknowledged) ||
+    (target === "cloudflare" && cloudflareToken.length === 0) ||
+    (operation === "restore" && !restoreAcknowledged) ||
+    (operation === "restore" &&
+      target === "cloudflare" &&
+      form.backupFilePath.length === 0) ||
+    (target === "compose-ssh" &&
+      sshAuthMethod === "private-key" &&
+      sshPrivateKeyPath.length === 0) ||
+    (target === "compose-ssh" &&
+      sshAuthMethod === "password" &&
+      sshPassword.length === 0) ||
+    ((operation === "backup" || operation === "restore") &&
+      target === "windows-client" &&
+      form.windowsArchivePath.length === 0);
   function copyOwnerCode() {
     void navigator.clipboard
       ?.writeText(effectiveOwnerCode)
@@ -1763,26 +1790,7 @@ function App() {
               {target !== "plan-only" && (
                 <button
                   className="btn primary"
-                  disabled={
-                    busy ||
-                    !release ||
-                    ownerCodeMissing ||
-                    (target === "cloudflare" && !costAcknowledged) ||
-                    (target === "cloudflare" && cloudflareToken.length === 0) ||
-                    (operation === "restore" && !restoreAcknowledged) ||
-                    (operation === "restore" &&
-                      target === "cloudflare" &&
-                      form.backupFilePath.length === 0) ||
-                    (target === "compose-ssh" &&
-                      sshAuthMethod === "private-key" &&
-                      sshPrivateKeyPath.length === 0) ||
-                    (target === "compose-ssh" &&
-                      sshAuthMethod === "password" &&
-                      sshPassword.length === 0) ||
-                    ((operation === "backup" || operation === "restore") &&
-                      target === "windows-client" &&
-                      form.windowsArchivePath.length === 0)
-                  }
+                  disabled={applyDisabled}
                   onClick={() => void run("apply")}
                 >
                   Apply{" "}
@@ -1793,12 +1801,29 @@ function App() {
               )}
             </>
           )}
-          {step === 4 && (
+          {step === 4 && applyPassed && (
             <button
               className="btn primary"
-              disabled={busy || !applyPassed}
+              disabled={busy}
               onClick={() => setStep(5)}
             >
+              Next
+            </button>
+          )}
+          {step === 4 && !applyPassed && preflightPassed && (
+            <button
+              className="btn primary"
+              disabled={applyDisabled}
+              onClick={() => void run("apply")}
+            >
+              Apply{" "}
+              {target === "windows-client"
+                ? "Windows lifecycle"
+                : "deployment"}
+            </button>
+          )}
+          {step === 4 && !applyPassed && !preflightPassed && (
+            <button className="btn primary" disabled onClick={() => setStep(5)}>
               Next
             </button>
           )}
