@@ -52,6 +52,26 @@ func (missingShellRunner) Run(context.Context, command, map[string]string) (stri
 	return "", errors.New("must not run")
 }
 
+func TestMissingOwnerSetupCodeSaysWhereToFixIt(t *testing.T) {
+	adapters := map[string]targetAdapter{
+		"compose-local": &localComposeAdapter{executor: &executor{runner: &localLifecycleRunner{}}},
+		"compose-ssh":   &composeAdapter{executor: &executor{runner: &localLifecycleRunner{}}},
+	}
+	plans := map[string]plan{"compose-local": validLocalPlan(), "compose-ssh": func() plan {
+		p := validPlan()
+		p.Target = "compose-ssh"
+		p.Cloudflare = nil
+		p.Compose = &compose{PublicURL: "https://hives.example", TargetDirectory: "/opt/apiarylens", SSHHostKeySha256: "SHA256:abc"}
+		return p
+	}()}
+	for name, adapter := range adapters {
+		phases, err := adapter.preflight(context.Background(), request{Plan: plans[name], Secrets: map[string]string{}})
+		if err == nil || !strings.Contains(err.Error(), "Review step") || !strings.Contains(err.Error(), "first family owner") {
+			t.Fatalf("%s owner-code failure must say where and why to fix it, err=%v phases=%+v", name, err, phases)
+		}
+	}
+}
+
 func TestLocalComposePreflightGivesHonestDockerGuidance(t *testing.T) {
 	adapter := &localComposeAdapter{executor: &executor{runner: missingShellRunner{}}}
 	phases, err := adapter.preflight(context.Background(), request{

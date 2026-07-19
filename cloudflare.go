@@ -57,7 +57,7 @@ func (a *cloudflareAdapter) preflight(ctx context.Context, input request) ([]pha
 			return append(phases, failed("Inspect retained installation protection", inspectErr)), inspectErr
 		}
 		if !existing["AUTH_ROOT_SECRET"] && len(input.Secrets["bootstrapToken"]) < 16 {
-			err := errors.New("an owner setup code of at least 16 characters is required only while installing")
+			err := errors.New("installing needs a one-time owner setup code of at least 16 characters — go back to the Review step and enter one; Scout uses it once to protect who becomes the first family owner")
 			return append(phases, failed("Verify one-time owner setup protection", err)), err
 		}
 		if existing["AUTH_ROOT_SECRET"] {
@@ -319,7 +319,7 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 		} else {
 			bootstrap := input.Secrets["bootstrapToken"]
 			if len(bootstrap) < 16 {
-				err = errors.New("an owner setup code of at least 16 characters is required for a fresh installation")
+				err = errors.New("a fresh installation needs a one-time owner setup code of at least 16 characters — go back to the Review step and enter one; Scout uses it once to protect who becomes the first family owner")
 				return append(phases, failed("Prepare one-time owner setup protection", err)), err
 			}
 			authRootBytes := make([]byte, 48)

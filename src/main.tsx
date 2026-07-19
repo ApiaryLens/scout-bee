@@ -487,6 +487,14 @@ function App() {
     operation === "update" ||
     operation === "repair" ||
     operation === "rollback";
+  // Owner UAT finding (2026-07-19): the one-time owner setup code must be
+  // clearly required on Review, and both preflight and apply stay blocked
+  // with an inline explanation until a valid code exists.
+  const ownerCodeNeeded =
+    operation === "install" &&
+    target !== "plan-only" &&
+    target !== "windows-client";
+  const ownerCodeMissing = ownerCodeNeeded && bootstrapToken.length < 16;
   const backendAddress =
     connectionProfile?.backendUrl ??
     (lifecycleOperation
@@ -1224,28 +1232,37 @@ function App() {
                   </label>
                 </>
               )}
-              {operation === "install" &&
-                target !== "plan-only" &&
-                target !== "windows-client" && (
-                  <label className="runtime-secret">
-                    One-time owner setup code
-                    <input
-                      type="password"
-                      autoComplete="new-password"
-                      minLength={16}
-                      value={bootstrapToken}
-                      onChange={(event) =>
-                        setBootstrapToken(event.target.value)
-                      }
-                      placeholder="At least 16 characters; save it until setup is complete"
-                    />
-                    <small>
-                      You will enter this code once when creating the first
-                      family owner. It stays in memory here and is never added
-                      to the plan or diagnostics.
-                    </small>
-                  </label>
-                )}
+              {ownerCodeNeeded && (
+                <label className="runtime-secret">
+                  <span>
+                    One-time owner setup code{" "}
+                    <span className="required-mark">required</span>
+                  </span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={16}
+                    required
+                    aria-required="true"
+                    aria-invalid={bootstrapToken.length < 16}
+                    value={bootstrapToken}
+                    onChange={(event) => setBootstrapToken(event.target.value)}
+                    placeholder="At least 16 characters; save it until setup is complete"
+                  />
+                  {bootstrapToken.length < 16 && (
+                    <span className="field-hint" role="status">
+                      Enter a setup code of at least 16 characters to continue.
+                      Even a local trial needs one — it protects who gets to
+                      become the first owner account on this ApiaryLens.
+                    </span>
+                  )}
+                  <small>
+                    You choose this code and enter it once in ApiaryLens when
+                    creating the first family owner account. It stays in memory
+                    here and is never added to the plan or diagnostics.
+                  </small>
+                </label>
+              )}
               {operation === "uninstall" && (
                 <label className="keep-data">
                   <input
@@ -1368,6 +1385,15 @@ function App() {
                 </div>
               )}
               <div className="progress-actions">
+                {phases.some(
+                  (phase) =>
+                    phase.state === "failed" &&
+                    (phase.detail ?? "").includes("owner setup code"),
+                ) && (
+                  <button className="btn primary" onClick={() => setStep(3)}>
+                    Go to Review and enter the code
+                  </button>
+                )}
                 {runFailed &&
                   (lastRunMode === "apply" || lastRunMode === "resume") && (
                     <button className="btn" onClick={() => void run("resume")}>
@@ -1528,11 +1554,18 @@ function App() {
           )}
           {step === 3 && (
             <>
+              {ownerCodeMissing && (
+                <span className="hint">
+                  Enter a setup code of at least 16 characters above to
+                  continue.
+                </span>
+              )}
               <button
                 className="btn"
                 disabled={
                   busy ||
                   !release ||
+                  ownerCodeMissing ||
                   (target === "cloudflare" && !costAcknowledged)
                 }
                 onClick={() => void run("dry-run")}
@@ -1545,6 +1578,7 @@ function App() {
                   disabled={
                     busy ||
                     !release ||
+                    ownerCodeMissing ||
                     (target === "cloudflare" && !costAcknowledged) ||
                     (target === "cloudflare" && cloudflareToken.length === 0) ||
                     (operation === "restore" && !restoreAcknowledged) ||
@@ -1559,10 +1593,7 @@ function App() {
                       sshPassword.length === 0) ||
                     ((operation === "backup" || operation === "restore") &&
                       target === "windows-client" &&
-                      form.windowsArchivePath.length === 0) ||
-                    (operation === "install" &&
-                      target !== "windows-client" &&
-                      bootstrapToken.length < 16)
+                      form.windowsArchivePath.length === 0)
                   }
                   onClick={() => void run("apply")}
                 >

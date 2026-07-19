@@ -1080,3 +1080,21 @@ details.plan-details pre {
 .callout.stable-empty h3 {
   color: var(--warn);
 }
+
+/* ---- required owner-code field (owner UAT 2026-07-19) ---- */
+.required-mark {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border-radius: 4px;
+  padding: 2px 7px;
+  margin-left: 6px;
+}
+.field-hint {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--warn);
+}

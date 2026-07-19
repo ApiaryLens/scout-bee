@@ -54,7 +54,7 @@ func localDockerGuidance() string {
 
 func (a *localComposeAdapter) preflight(ctx context.Context, input request) ([]phase, error) {
 	if input.Plan.Operation == "install" && len(input.Secrets["bootstrapToken"]) < 16 {
-		err := errors.New("an owner setup code of at least 16 characters is required only while installing")
+		err := errors.New("installing needs a one-time owner setup code of at least 16 characters — go back to the Review step and enter one; Scout uses it once to protect who becomes the first family owner")
 		return []phase{failed("Verify one-time owner setup protection", err)}, err
 	}
 	if err := a.executor.runner.Find(localShellName()); err != nil {
