@@ -99,20 +99,10 @@ const railNotes: Record<number, string> = {
   5: "Come back to Scout anytime — to update, back up, restore, or repair.",
 };
 
-// Resolve the launch token from the URL (query param, with legacy #fragment
-// fallback) and persist it so reloads / bare-URL tabs stay authorized. See
-// launch-token.ts for why this matters on Windows.
-const token = resolveLaunchToken(
-  location.search,
-  location.hash,
-  (() => {
-    try {
-      return window.localStorage;
-    } catch {
-      return null;
-    }
-  })(),
-);
+// Resolve the per-launch, in-memory launch token from the URL (query param,
+// with legacy #fragment fallback). See launch-token.ts for why delivery is a
+// query param on Windows, and why the token is never persisted.
+const token = resolveLaunchToken(location.search, location.hash);
 // Owner UAT finding (2026-07-19): a lost loopback backend must never surface
 // as a raw fetch error. Every Scout API call is loopback-only, so a network
 // failure means Scout's own local process is gone.
