@@ -249,11 +249,16 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 		return []phase{failed("Prepare protected staging folder", err)}, err
 	}
 	defer os.RemoveAll(temp)
-	bundle, err := a.executor.downloadArtifact(ctx, artifact, temp)
+	bundle, err := a.executor.downloadVerifiedArtifact(ctx, manifest, artifact, temp)
 	if err != nil {
 		return []phase{failed("Download and verify deployment bundle", err)}, err
 	}
-	phases := []phase{pass("Download and verify deployment bundle", "The immutable Cloudflare bundle matches the release manifest.")}
+	phases := []phase{pass("Download and verify deployment bundle", fmt.Sprintf("The immutable Cloudflare bundle matches the release manifest: SHA-256 %s (%d bytes).", strings.ToLower(artifact.Sha256), artifact.Bytes))}
+	attestationDetail, attestationErr := a.executor.verifyArtifactAttestation(ctx, artifact)
+	if attestationErr != nil {
+		return append(phases, failed("Verify GitHub build attestation", attestationErr)), attestationErr
+	}
+	phases = append(phases, pass("Verify GitHub build attestation", attestationDetail))
 	root := filepath.Join(temp, "bundle")
 	if err = os.Mkdir(root, 0o700); err == nil {
 		err = extractTarGz(bundle, root)

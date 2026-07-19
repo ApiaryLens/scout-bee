@@ -14,6 +14,7 @@ type Operation =
   | "uninstall";
 type ProductChannel = "preview" | "release-candidate" | "stable";
 type SSHAuthMethod = "agent" | "private-key" | "password";
+type ThemeMode = "auto" | "light" | "dark";
 type Phase = {
   name: string;
   state: "waiting" | "running" | "passed" | "failed";
@@ -67,6 +68,22 @@ const cloudflareAllowances = [
   ],
 ] as const;
 
+const wizardSteps = [
+  "Choose a setup",
+  "Details",
+  "Review",
+  "Install & verify",
+  "Finish",
+] as const;
+
+const railNotes: Record<number, string> = {
+  1: "Scout runs only while this window is open. It never installs anything in the background.",
+  2: "Scout runs only while this window is open. It never installs anything in the background.",
+  3: "Nothing is downloaded or installed until you review this summary and choose to apply it.",
+  4: "If any check fails, Scout stops before installing and nothing on the target changes.",
+  5: "Come back to Scout anytime — to update, back up, restore, or repair.",
+};
+
 const token = location.hash.slice(1);
 const call = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, {
@@ -87,6 +104,32 @@ const call = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   return body as T;
 };
 
+function BeeMark() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="11" r="5.5" fill="var(--accent)" />
+      <rect x="5" y="9" width="10" height="1.8" fill="var(--rail)" />
+      <rect x="5.6" y="12" width="8.8" height="1.8" fill="var(--rail)" />
+      <ellipse
+        cx="6.5"
+        cy="5.5"
+        rx="3.4"
+        ry="2.2"
+        fill="#ffffff"
+        opacity=".85"
+      />
+      <ellipse
+        cx="13.5"
+        cy="5.5"
+        rx="3.4"
+        ry="2.2"
+        fill="#ffffff"
+        opacity=".85"
+      />
+    </svg>
+  );
+}
+
 function App() {
   const [target, setTarget] = useState<Target>("cloudflare");
   const [operation, setOperation] = useState<Operation>("install");
@@ -106,6 +149,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [phases, setPhases] = useState<Phase[]>([]);
+  const [lastRunMode, setLastRunMode] = useState<
+    "" | "dry-run" | "apply" | "resume"
+  >("");
   const [release, setRelease] = useState<ReleaseIdentity | null>(null);
   const [history, setHistory] = useState<OperationSummary[]>([]);
   const [connectionProfile, setConnectionProfile] =
@@ -113,6 +159,8 @@ function App() {
   // Defaults to off: the Windows client target stays hidden unless the Scout
   // server explicitly reports SCOUT_BEE_ENABLE_WINDOWS_CLIENT (ADR 0023).
   const [windowsClientEnabled, setWindowsClientEnabled] = useState(false);
+  const [scoutVersion, setScoutVersion] = useState("");
+  const [theme, setTheme] = useState<ThemeMode>("auto");
   const [form, setForm] = useState<Record<string, string>>({
     accountReference: "",
     workerName: "apiarylens-family",
@@ -211,18 +259,27 @@ function App() {
     void refreshHistory().catch(() => undefined);
   }, []);
   useEffect(() => {
-    void call<{ windowsClientEnabled?: boolean }>("/api/v1/status")
-      .then((status) =>
-        setWindowsClientEnabled(status.windowsClientEnabled === true),
-      )
+    void call<{ windowsClientEnabled?: boolean; version?: string }>(
+      "/api/v1/status",
+    )
+      .then((status) => {
+        setWindowsClientEnabled(status.windowsClientEnabled === true);
+        if (typeof status.version === "string") setScoutVersion(status.version);
+      })
       .catch(() => undefined);
   }, []);
+  useEffect(() => {
+    if (theme === "auto")
+      document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
   const update = (name: string, value: string) =>
     setForm((current) => ({ ...current, [name]: value }));
 
   async function run(mode: "dry-run" | "apply" | "resume") {
     setBusy(true);
     setError("");
+    setLastRunMode(mode);
     try {
       const result = await call<{
         phases: Phase[];
@@ -336,6 +393,19 @@ function App() {
     a.click();
     URL.revokeObjectURL(a.href);
   }
+  function startBackup() {
+    setOperation("backup");
+    setRestoreAcknowledged(false);
+    setPhases([]);
+    setLastRunMode("");
+    setStep(2);
+  }
+  function finishWizard() {
+    setPhases([]);
+    setLastRunMode("");
+    setConnectionProfile(null);
+    setStep(1);
+  }
   const lastVerifiedBackup = history.find(
     (item) =>
       item.operation === "backup" &&
@@ -343,608 +413,880 @@ function App() {
       item.status === "passed",
   );
   const lastRestore = history.find((item) => item.operation === "restore");
+  const runFailed = phases.some((phase) => phase.state === "failed");
+  const applyPassed =
+    lastRunMode === "apply" && phases.length > 0 && !runFailed;
+  const lifecycleOperation =
+    operation === "install" ||
+    operation === "update" ||
+    operation === "repair" ||
+    operation === "rollback";
+  const backendAddress =
+    connectionProfile?.backendUrl ??
+    (lifecycleOperation
+      ? target === "compose-ssh"
+        ? form.publicUrl
+        : target === "cloudflare" && form.customDomain
+          ? form.customDomain
+          : ""
+      : "");
+  const nextThemeLabel =
+    theme === "auto" ? "Auto" : theme === "light" ? "Light" : "Dark";
 
   return (
-    <div className="shell">
-      <aside>
-        <div className="brand">
-          <span>Scout Bee</span>
-          <small>by ApiaryLens</small>
+    <div className="ground">
+      <div className="dialog">
+        <div className="titlebar">
+          <span className="dot" aria-hidden="true"></span>
+          <span>
+            Scout Bee{scoutVersion ? ` ${scoutVersion}` : ""} — ApiaryLens{" "}
+            {step === 5 ? "handoff" : "setup"}
+          </span>
+          <button
+            className="theme-btn"
+            onClick={() =>
+              setTheme(
+                theme === "auto"
+                  ? "light"
+                  : theme === "light"
+                    ? "dark"
+                    : "auto",
+              )
+            }
+          >
+            Theme: {nextThemeLabel}
+          </button>
         </div>
-        <ol>
-          {[
-            "Choose a home",
-            "Deployment details",
-            "Review the plan",
-            "Preflight & apply",
-          ].map((label, index) => (
-            <li
+        <aside className="rail" aria-label="Setup steps">
+          <div className="brand">
+            <BeeMark />
+            Scout Bee
+          </div>
+          {wizardSteps.map((label, index) => (
+            <div
               className={
-                step === index + 1 ? "active" : step > index + 1 ? "done" : ""
+                "step" +
+                (step === index + 1 ? " now" : step > index + 1 ? " done" : "")
               }
               key={label}
             >
-              <b>{index + 1}</b>
+              <span className="n">{step > index + 1 ? "✓" : index + 1}</span>
               {label}
-            </li>
+            </div>
           ))}
-        </ol>
-        <p className="privacy">
-          Your credentials stay in memory and never enter the deployment plan or
-          diagnostics.
-        </p>
-      </aside>
-      <main>
-        <header>
-          <p className="eyebrow">Guided deployment</p>
-          <h1>
-            {step === 1
-              ? "Where should your hive history live?"
-              : step === 2
-                ? "Tell Scout Bee where to work."
-                : step === 3
-                  ? "Review before anything changes."
-                  : "Deployment progress"}
-          </h1>
-        </header>
-        {error && (
-          <div className="error" role="alert">
-            {error}
-          </div>
-        )}
-        {step === 1 && (
-          <>
-            <section className="targets">
-              {availableTargets(windowsClientEnabled).map((definition) => (
-                <button
-                  className={target === definition.id ? "selected" : ""}
-                  key={definition.id}
-                  onClick={() => setTarget(definition.id)}
-                >
-                  <b>{definition.title}</b>
-                  <span>{definition.subtitle}</span>
-                  <p>{definition.description}</p>
-                </button>
-              ))}
-            </section>
-            <section
-              className="recovery-status"
-              aria-labelledby="recovery-status-heading"
-            >
-              <div>
-                <p className="eyebrow">Recovery readiness</p>
-                <h2 id="recovery-status-heading">Backup and restore history</h2>
-                <p>
-                  A browser or phone's offline working copy is not a server
-                  backup. Scout backups include the deployment's records and
-                  private media.
-                </p>
+          <div className="rail-note">{railNotes[step]}</div>
+        </aside>
+        <div className="pane" aria-live={step === 4 ? "polite" : undefined}>
+          {error && (
+            <div className="error" role="alert">
+              {error}
+            </div>
+          )}
+          {step === 1 && (
+            <>
+              <h1>Where should your family’s hive records live?</h1>
+              <p className="lede">
+                Pick the setup that fits your family. Every choice installs the
+                same ApiaryLens — only where it runs is different, and you can
+                see exactly what each one means before anything happens.
+              </p>
+              <div
+                className="choices"
+                role="radiogroup"
+                aria-label="Setup choices"
+              >
+                {availableTargets(windowsClientEnabled).map((definition) => (
+                  <button
+                    className={
+                      "choice" + (target === definition.id ? " selected" : "")
+                    }
+                    role="radio"
+                    aria-checked={target === definition.id}
+                    key={definition.id}
+                    onClick={() => setTarget(definition.id)}
+                  >
+                    <span className="radio" aria-hidden="true"></span>
+                    <h2>
+                      {definition.title}{" "}
+                      <span className="flag">{definition.flag}</span>
+                    </h2>
+                    <p>{definition.description}</p>
+                    <span className="best">
+                      <b>Best for:</b> {definition.bestFor}
+                    </span>
+                  </button>
+                ))}
               </div>
-              <dl>
-                <div>
-                  <dt>Last verified backup</dt>
-                  <dd>
+              <details className="adv">
+                <summary>Advanced release channel</summary>
+                <div className="adv-body">
+                  {(
+                    [
+                      [
+                        "stable",
+                        "Stable",
+                        "recommended and selected by default. The newest release that has finished testing.",
+                      ],
+                      [
+                        "preview",
+                        "Preview",
+                        "early builds for people helping test. Changing frequently — not for your family's only copy of the records.",
+                      ],
+                      [
+                        "release-candidate",
+                        "Release candidate",
+                        "the final check before a stable release.",
+                      ],
+                    ] as const
+                  ).map(([value, label, explanation]) => (
+                    <label key={value}>
+                      <input
+                        type="radio"
+                        name="chan"
+                        checked={productChannel === value}
+                        onChange={() => setProductChannel(value)}
+                      />
+                      <span>
+                        <b>{label}</b> — {explanation}
+                      </span>
+                    </label>
+                  ))}
+                  <small>
+                    Preview and RC builds require this explicit advanced
+                    selection on every Scout installation.
+                  </small>
+                </div>
+              </details>
+              <section
+                className="maintenance"
+                aria-labelledby="recovery-status-heading"
+              >
+                <h3 id="recovery-status-heading" className="section-label">
+                  On this computer
+                </h3>
+                <div className="status-strip">
+                  <span>
+                    <b>Last verified backup:</b>{" "}
                     {lastVerifiedBackup?.finishedAt
                       ? new Date(lastVerifiedBackup.finishedAt).toLocaleString()
-                      : "No verified Scout backup recorded on this computer"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Last restore attempt</dt>
-                  <dd>
+                      : "none recorded"}
+                  </span>
+                  <span>
+                    <b>Last restore:</b>{" "}
                     {lastRestore
                       ? `${lastRestore.status} · ${new Date(lastRestore.finishedAt ?? lastRestore.startedAt).toLocaleString()}`
-                      : "No restore recorded on this computer"}
-                  </dd>
+                      : "none recorded"}
+                  </span>
                 </div>
-              </dl>
-            </section>
-            {target === "cloudflare" && <CloudflareCostGuide />}
-          </>
-        )}
-        {step === 2 && (
-          <section className="form">
-            <label>
-              What should Scout Bee do?
-              <select
-                value={operation}
-                onChange={(event) => {
-                  setOperation(event.target.value as Operation);
-                  setRestoreAcknowledged(false);
-                }}
-              >
-                <option value="install">Install a new deployment</option>
-                <option value="update">Update an existing deployment</option>
-                <option value="repair">
-                  Repair using the same verified release
-                </option>
-                <option value="rollback">
-                  Roll back to a selected compatible release
-                </option>
-                <option value="backup">Create and verify a backup</option>
-                <option value="restore">Restore a verified backup</option>
-                <option value="export" disabled={target === "windows-client"}>
-                  Export owned data
-                </option>
-                <option value="uninstall">Uninstall ApiaryLens</option>
-              </select>
-            </label>
-            <div className="release-selection">
-              <b>Product release channel</b>
-              <span>Stable is always selected by default.</span>
-              <details>
-                <summary>Advanced release channel</summary>
+                <div className="callout backup">
+                  <h3>Backups — your safety net</h3>
+                  <p>
+                    A browser or phone’s offline working copy is not a server
+                    backup. Scout backups include the deployment’s records and
+                    private media, and Scout verifies every backup file after
+                    writing it.
+                  </p>
+                  <div className="act">
+                    <button className="btn" onClick={startBackup}>
+                      Back up now
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </>
+          )}
+          {step === 2 && (
+            <>
+              <h1>Tell Scout Bee where to work.</h1>
+              <section className="form">
                 <label>
-                  Channel
+                  What should Scout Bee do?
                   <select
-                    value={productChannel}
-                    onChange={(event) =>
-                      setProductChannel(event.target.value as ProductChannel)
-                    }
+                    value={operation}
+                    onChange={(event) => {
+                      setOperation(event.target.value as Operation);
+                      setRestoreAcknowledged(false);
+                    }}
                   >
-                    <option value="stable">Stable</option>
-                    <option value="preview">
-                      Preview (changing frequently)
+                    <option value="install">Install a new deployment</option>
+                    <option value="update">
+                      Update an existing deployment
                     </option>
-                    <option value="release-candidate">Release candidate</option>
+                    <option value="repair">
+                      Repair using the same verified release
+                    </option>
+                    <option value="rollback">
+                      Roll back to a selected compatible release
+                    </option>
+                    <option value="backup">Create and verify a backup</option>
+                    <option value="restore">Restore a verified backup</option>
+                    <option
+                      value="export"
+                      disabled={target === "windows-client"}
+                    >
+                      Export owned data
+                    </option>
+                    <option value="uninstall">Uninstall ApiaryLens</option>
                   </select>
                 </label>
-                <small>
-                  Preview and RC builds can change frequently and require this
-                  explicit advanced selection on every Scout installation.
-                </small>
-              </details>
-            </div>
-            {target !== "windows-client" && (
-              <div
-                className="frontend-selection"
-                role="group"
-                aria-labelledby="frontend-selection-label"
-              >
-                <b id="frontend-selection-label">Deployment content</b>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={includeWebFrontend}
-                    onChange={(event) =>
-                      setIncludeWebFrontend(event.target.checked)
-                    }
-                  />
-                  Include the ApiaryLens web application
-                </label>
-                <small>
-                  Clear this for a backend-only deployment used by connected
-                  Windows or mobile clients. API, authentication, sync, media,
-                  health checks, HTTPS, backup, and recovery remain enabled.
-                </small>
-              </div>
-            )}
-            {target === "compose-ssh" ? (
-              <>
-                <Field
-                  label="Server address"
-                  name="host"
-                  value={form.host}
-                  update={update}
-                />
-                <Field
-                  label="Linux user"
-                  name="user"
-                  value={form.user}
-                  update={update}
-                />
-                <Field
-                  label="Install folder"
-                  name="targetDirectory"
-                  value={form.targetDirectory}
-                  update={update}
-                />
-                <Field
-                  label="Public HTTPS address"
-                  name="publicUrl"
-                  value={form.publicUrl}
-                  update={update}
-                />
-                <Field
-                  label="Verified SSH host key"
-                  name="sshHostKeySha256"
-                  value={form.sshHostKeySha256}
-                  update={update}
-                />
-                <div className="ssh-authentication">
-                  <label>
-                    SSH authentication
-                    <select
-                      value={sshAuthMethod}
-                      onChange={(event) => {
-                        setSSHAuthMethod(event.target.value as SSHAuthMethod);
-                        setSSHPrivateKeyPath("");
-                        setSSHPrivateKeyPassphrase("");
-                        setSSHPassword("");
-                      }}
-                    >
-                      <option value="agent">
-                        OpenSSH agent or default identity
-                      </option>
-                      <option value="private-key">
-                        Explicit private key file
-                      </option>
-                      <option value="password">
-                        Password (Windows Scout only)
-                      </option>
-                    </select>
-                  </label>
-                  {sshAuthMethod === "private-key" && (
-                    <>
-                      <label className="runtime-secret">
-                        Private key file
-                        <input
-                          type="text"
-                          autoComplete="off"
-                          value={sshPrivateKeyPath}
-                          onChange={(event) =>
-                            setSSHPrivateKeyPath(event.target.value)
-                          }
-                          placeholder="C:\\Users\\you\\.ssh\\id_ed25519"
-                        />
-                        <small>
-                          The absolute path is used only for this operation. It
-                          is never added to the plan, history, logs, or
-                          diagnostics.
-                        </small>
-                      </label>
-                      <label className="runtime-secret">
-                        Private key passphrase (optional; Windows Scout only)
-                        <input
-                          type="password"
-                          autoComplete="off"
-                          value={sshPrivateKeyPassphrase}
-                          onChange={(event) =>
-                            setSSHPrivateKeyPassphrase(event.target.value)
-                          }
-                          placeholder="Leave empty for an unencrypted key"
-                        />
-                        <small>
-                          On Windows, Scout provides this through a protected,
-                          temporary OpenSSH askpass boundary and deletes it when
-                          the operation ends.
-                        </small>
-                      </label>
-                    </>
-                  )}
-                  {sshAuthMethod === "password" && (
-                    <label className="runtime-secret">
-                      SSH password
+                <div className="release-selection">
+                  <b>Product release</b>
+                  <span>
+                    {release
+                      ? `ApiaryLens ${release.version} · ${release.channel}`
+                      : "Resolving the official release identity…"}
+                  </span>
+                  <small>
+                    Stable is always selected by default; the Advanced release
+                    channel choice lives on the first screen.
+                  </small>
+                </div>
+                {target !== "windows-client" && (
+                  <div
+                    className="frontend-selection"
+                    role="group"
+                    aria-labelledby="frontend-selection-label"
+                  >
+                    <b id="frontend-selection-label">Deployment content</b>
+                    <label>
                       <input
-                        type="password"
-                        autoComplete="off"
-                        value={sshPassword}
-                        onChange={(event) => setSSHPassword(event.target.value)}
-                        placeholder="Used only during this operation"
+                        type="checkbox"
+                        checked={includeWebFrontend}
+                        onChange={(event) =>
+                          setIncludeWebFrontend(event.target.checked)
+                        }
                       />
-                      <small>
-                        On Windows, Scout provides this through a protected,
-                        temporary OpenSSH askpass boundary and deletes it when
-                        the operation ends.
-                      </small>
+                      Include the ApiaryLens web application
                     </label>
-                  )}
-                  {sshAuthMethod === "agent" && (
                     <small>
-                      Scout uses the current OpenSSH agent and default identity
-                      files without prompting or persisting a credential.
+                      Clear this for a backend-only deployment used by connected
+                      Windows or mobile clients. API, authentication, sync,
+                      media, health checks, HTTPS, backup, and recovery remain
+                      enabled.
                     </small>
-                  )}
-                </div>
-              </>
-            ) : target === "windows-client" ? (
-              <>
-                <div className="target-note" role="note">
-                  <b>Current-user Windows installation</b>
-                  <p>
-                    Scout verifies the exact product manifest, package
-                    checksums, and Authenticode signer before lifecycle work.
-                    Backup and restore use protected runtime-only
-                    request/evidence files; the archive path is never added to
-                    the plan, history, logs, or diagnostics. Advanced Windows
-                    data export remains unavailable.
-                  </p>
-                </div>
-                {(operation === "backup" || operation === "restore") && (
-                  <Field
-                    label={
-                      operation === "backup"
-                        ? "New Windows backup file (.albackup)"
-                        : "Existing Windows backup file (.albackup)"
-                    }
-                    name="windowsArchivePath"
-                    value={form.windowsArchivePath}
-                    update={update}
-                    placeholder="C:\\Users\\you\\Documents\\apiarylens-family.albackup"
-                  />
+                  </div>
                 )}
-              </>
-            ) : (
-              <>
-                <Field
-                  label="Cloudflare account ID"
-                  name="accountReference"
-                  value={form.accountReference}
-                  update={update}
-                />
-                <Field
-                  label="ApiaryLens deployment name"
-                  name="workerName"
-                  value={form.workerName}
-                  update={update}
-                />
-                <Field
-                  label="Records database name"
-                  name="d1DatabaseName"
-                  value={form.d1DatabaseName}
-                  update={update}
-                />
-                <Field
-                  label="Private photo storage name"
-                  name="r2BucketName"
-                  value={form.r2BucketName}
-                  update={update}
-                />
-                <Field
-                  label="Deployment HTTPS address"
-                  name="customDomain"
-                  value={form.customDomain}
-                  update={update}
-                  placeholder="https://hives.example.com"
-                />
-                {(operation === "backup" ||
-                  operation === "export" ||
-                  operation === "update" ||
-                  operation === "repair" ||
-                  operation === "rollback") && (
-                  <Field
-                    label={
+                {target === "compose-ssh" ? (
+                  <>
+                    <Field
+                      label="Server address"
+                      name="host"
+                      value={form.host}
+                      update={update}
+                    />
+                    <Field
+                      label="Linux user"
+                      name="user"
+                      value={form.user}
+                      update={update}
+                    />
+                    <Field
+                      label="Install folder"
+                      name="targetDirectory"
+                      value={form.targetDirectory}
+                      update={update}
+                    />
+                    <Field
+                      label="Public HTTPS address"
+                      name="publicUrl"
+                      value={form.publicUrl}
+                      update={update}
+                    />
+                    <Field
+                      label="Verified SSH host key"
+                      name="sshHostKeySha256"
+                      value={form.sshHostKeySha256}
+                      update={update}
+                    />
+                    <div className="ssh-authentication">
+                      <label>
+                        SSH authentication
+                        <select
+                          value={sshAuthMethod}
+                          onChange={(event) => {
+                            setSSHAuthMethod(
+                              event.target.value as SSHAuthMethod,
+                            );
+                            setSSHPrivateKeyPath("");
+                            setSSHPrivateKeyPassphrase("");
+                            setSSHPassword("");
+                          }}
+                        >
+                          <option value="agent">
+                            OpenSSH agent or default identity
+                          </option>
+                          <option value="private-key">
+                            Explicit private key file
+                          </option>
+                          <option value="password">
+                            Password (Windows Scout only)
+                          </option>
+                        </select>
+                      </label>
+                      {sshAuthMethod === "private-key" && (
+                        <>
+                          <label className="runtime-secret">
+                            Private key file
+                            <input
+                              type="text"
+                              autoComplete="off"
+                              value={sshPrivateKeyPath}
+                              onChange={(event) =>
+                                setSSHPrivateKeyPath(event.target.value)
+                              }
+                              placeholder="C:\\Users\\you\\.ssh\\id_ed25519"
+                            />
+                            <small>
+                              The absolute path is used only for this operation.
+                              It is never added to the plan, history, logs, or
+                              diagnostics.
+                            </small>
+                          </label>
+                          <label className="runtime-secret">
+                            Private key passphrase (optional; Windows Scout
+                            only)
+                            <input
+                              type="password"
+                              autoComplete="off"
+                              value={sshPrivateKeyPassphrase}
+                              onChange={(event) =>
+                                setSSHPrivateKeyPassphrase(event.target.value)
+                              }
+                              placeholder="Leave empty for an unencrypted key"
+                            />
+                            <small>
+                              On Windows, Scout provides this through a
+                              protected, temporary OpenSSH askpass boundary and
+                              deletes it when the operation ends.
+                            </small>
+                          </label>
+                        </>
+                      )}
+                      {sshAuthMethod === "password" && (
+                        <label className="runtime-secret">
+                          SSH password
+                          <input
+                            type="password"
+                            autoComplete="off"
+                            value={sshPassword}
+                            onChange={(event) =>
+                              setSSHPassword(event.target.value)
+                            }
+                            placeholder="Used only during this operation"
+                          />
+                          <small>
+                            On Windows, Scout provides this through a protected,
+                            temporary OpenSSH askpass boundary and deletes it
+                            when the operation ends.
+                          </small>
+                        </label>
+                      )}
+                      {sshAuthMethod === "agent" && (
+                        <small>
+                          Scout uses the current OpenSSH agent and default
+                          identity files without prompting or persisting a
+                          credential.
+                        </small>
+                      )}
+                    </div>
+                  </>
+                ) : target === "windows-client" ? (
+                  <>
+                    <div className="target-note" role="note">
+                      <b>Current-user Windows installation</b>
+                      <p>
+                        Scout verifies the exact product manifest, package
+                        checksums, and Authenticode signer before lifecycle
+                        work. Backup and restore use protected runtime-only
+                        request/evidence files; the archive path is never added
+                        to the plan, history, logs, or diagnostics. Advanced
+                        Windows data export remains unavailable.
+                      </p>
+                    </div>
+                    {(operation === "backup" || operation === "restore") && (
+                      <Field
+                        label={
+                          operation === "backup"
+                            ? "New Windows backup file (.albackup)"
+                            : "Existing Windows backup file (.albackup)"
+                        }
+                        name="windowsArchivePath"
+                        value={form.windowsArchivePath}
+                        update={update}
+                        placeholder="C:\\Users\\you\\Documents\\apiarylens-family.albackup"
+                      />
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <Field
+                      label="Cloudflare account ID"
+                      name="accountReference"
+                      value={form.accountReference}
+                      update={update}
+                    />
+                    <Field
+                      label="ApiaryLens deployment name"
+                      name="workerName"
+                      value={form.workerName}
+                      update={update}
+                    />
+                    <Field
+                      label="Records database name"
+                      name="d1DatabaseName"
+                      value={form.d1DatabaseName}
+                      update={update}
+                    />
+                    <Field
+                      label="Private photo storage name"
+                      name="r2BucketName"
+                      value={form.r2BucketName}
+                      update={update}
+                    />
+                    <Field
+                      label="Deployment HTTPS address"
+                      name="customDomain"
+                      value={form.customDomain}
+                      update={update}
+                      placeholder="https://hives.example.com"
+                    />
+                    {(operation === "backup" ||
+                      operation === "export" ||
                       operation === "update" ||
                       operation === "repair" ||
-                      operation === "rollback"
-                        ? "Local folder for the required pre-update backup (optional)"
-                        : "Local folder for the archive (optional)"
-                    }
-                    name="backupDestination"
-                    value={form.backupDestination}
-                    update={update}
-                    placeholder="Defaults to your Downloads folder"
-                  />
+                      operation === "rollback") && (
+                      <Field
+                        label={
+                          operation === "update" ||
+                          operation === "repair" ||
+                          operation === "rollback"
+                            ? "Local folder for the required pre-update backup (optional)"
+                            : "Local folder for the archive (optional)"
+                        }
+                        name="backupDestination"
+                        value={form.backupDestination}
+                        update={update}
+                        placeholder="Defaults to your Downloads folder"
+                      />
+                    )}
+                    {operation === "restore" && (
+                      <Field
+                        label="Verified backup file to restore"
+                        name="backupFilePath"
+                        value={form.backupFilePath}
+                        update={update}
+                        placeholder="C:\\Backups\\apiarylens-backup.zip"
+                      />
+                    )}
+                  </>
                 )}
-                {operation === "restore" && (
-                  <Field
-                    label="Verified backup file to restore"
-                    name="backupFilePath"
-                    value={form.backupFilePath}
-                    update={update}
-                    placeholder="C:\\Backups\\apiarylens-backup.zip"
-                  />
-                )}
-              </>
-            )}
-          </section>
-        )}
-        {step === 3 && (
-          <section>
-            <div className="review">
-              <div>
-                <b>Release</b>
-                <span>
-                  {release
-                    ? `${release.version} · ${release.channel}`
-                    : "Loading…"}
-                </span>
-              </div>
-              <div>
-                <b>Target</b>
-                <span>
-                  {target === "compose-ssh"
-                    ? "Your Linux server"
-                    : target === "windows-client"
-                      ? "This Windows account"
-                      : target === "plan-only"
-                        ? "Export only"
-                        : "Your Cloudflare account"}
-                </span>
-              </div>
-              <div>
-                <b>Operation</b>
-                <span>{operation}</span>
-              </div>
-              {target !== "windows-client" && (
-                <div>
-                  <b>Deployment content</b>
-                  <span>
-                    {includeWebFrontend
-                      ? "Backend and web application"
-                      : "Backend only"}
-                  </span>
-                </div>
-              )}
-              {target === "compose-ssh" && (
-                <div>
-                  <b>SSH authentication</b>
-                  <span>
-                    {sshAuthMethod === "agent"
-                      ? "OpenSSH agent/default identity"
-                      : sshAuthMethod === "private-key"
-                        ? "Runtime-only private key"
-                        : "Runtime-only password"}
-                  </span>
-                </div>
-              )}
-              <div>
-                <b>Safety</b>
-                <span>
-                  {target === "windows-client"
-                    ? "Package identity, checksums, Authenticode signer, installed host security, and health are verified before completion."
-                    : "HTTPS, authentication, backup readiness, and versions are verified before completion."}
-                </span>
-              </div>
-            </div>
-            {target === "cloudflare" && (
-              <>
-                <CloudflareCostGuide />
-                <label className="cost-acknowledgement">
-                  <input
-                    type="checkbox"
-                    checked={costAcknowledged}
-                    onChange={(event) =>
-                      setCostAcknowledged(event.target.checked)
-                    }
-                  />
-                  I reviewed these dated allowances and understand that
-                  Cloudflare can change pricing or limits.
-                </label>
-                <label className="runtime-secret">
-                  Cloudflare API token
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={cloudflareToken}
-                    onChange={(event) => setCloudflareToken(event.target.value)}
-                    placeholder="Used only while this application is open"
-                  />
-                  <small>
-                    This value stays in memory and is never added to the plan or
-                    diagnostics.
-                  </small>
-                </label>
-              </>
-            )}
-            {operation === "install" &&
-              target !== "plan-only" &&
-              target !== "windows-client" && (
-                <label className="runtime-secret">
-                  One-time owner setup code
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    minLength={16}
-                    value={bootstrapToken}
-                    onChange={(event) => setBootstrapToken(event.target.value)}
-                    placeholder="At least 16 characters; save it until setup is complete"
-                  />
-                  <small>
-                    You will enter this code once when creating the first family
-                    owner. It stays in memory here and is never added to the
-                    plan or diagnostics.
-                  </small>
-                </label>
-              )}
-            {operation === "uninstall" && (
-              <label className="keep-data">
-                <input
-                  type="checkbox"
-                  checked={keepData}
-                  onChange={(event) => setKeepData(event.target.checked)}
-                />
-                Keep database and media volumes so the deployment can be
-                recovered later
-              </label>
-            )}
-            {operation === "restore" && (
-              <div className="restore-warning" role="note">
-                <strong>
-                  Restore replaces current{" "}
-                  {target === "windows-client" ? "Windows" : "server"} records
-                  and media.
-                </strong>
-                <p>
-                  Scout first creates a recovery backup, verifies the selected
-                  archive and target compatibility, restores the{" "}
-                  {target === "windows-client" ? "Windows data" : "server"},
-                  revokes existing sign-in sessions, and requires a passing
-                  health check.
-                </p>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={restoreAcknowledged}
-                    onChange={(event) =>
-                      setRestoreAcknowledged(event.target.checked)
-                    }
-                  />
-                  I understand the current server data will be replaced and
-                  users must sign in again.
-                </label>
-              </div>
-            )}
-            <details>
-              <summary>View the operator plan</summary>
-              <pre>{JSON.stringify(plan, null, 2)}</pre>
-            </details>
-          </section>
-        )}
-        {step === 4 && (
-          <section className="progress">
-            {phases.map((phase) => (
-              <article className={phase.state} key={phase.name}>
-                <i></i>
-                <div>
-                  <b>{phase.name}</b>
-                  {phase.detail && <p>{phase.detail}</p>}
-                </div>
-                <span>{phase.state}</span>
-              </article>
-            ))}
-            <div className="complete">
-              <h2>
-                {phases.some((p) => p.state === "failed")
-                  ? "Scout Bee stopped safely."
-                  : "The requested work completed."}
-              </h2>
-              <p>No secret values were written to the plan or log.</p>
-              {connectionProfile && (
-                <p>
-                  The verified deployment is ready to connect to the ApiaryLens
-                  Windows application. The connection file contains no
-                  credentials.
-                </p>
-              )}
-            </div>
-            <div className="progress-actions">
-              {connectionProfile && (
-                <button onClick={saveConnectionProfile}>
-                  Save Windows connection file
-                </button>
-              )}
-              <button
-                className="secondary"
-                onClick={() => void saveDiagnostics()}
-              >
-                Save sanitized diagnostics
-              </button>
-              {phases.some((phase) => phase.state === "failed") && (
-                <button onClick={() => void run("resume")}>
-                  Resume safely
-                </button>
-              )}
-            </div>
-          </section>
-        )}
-        <footer>
-          {step > 1 && step < 4 && (
-            <button className="secondary" onClick={() => setStep(step - 1)}>
-              Back
-            </button>
-          )}
-          <span></span>
-          {step === 1 && <button onClick={() => setStep(2)}>Continue</button>}
-          {step === 2 && (
-            <button onClick={() => setStep(3)}>Review plan</button>
+              </section>
+            </>
           )}
           {step === 3 && (
             <>
-              <button className="secondary" onClick={exportPlan}>
-                Export plan
-              </button>
+              <h1>Review before anything changes.</h1>
+              <div className="review">
+                <div>
+                  <b>Release</b>
+                  <span>
+                    {release
+                      ? `ApiaryLens ${release.version} · ${release.channel}`
+                      : "Loading…"}
+                  </span>
+                </div>
+                <div>
+                  <b>Target</b>
+                  <span>
+                    {target === "compose-ssh"
+                      ? "Your Linux server"
+                      : target === "windows-client"
+                        ? "This Windows account"
+                        : target === "plan-only"
+                          ? "Export only"
+                          : "Your Cloudflare account"}
+                  </span>
+                </div>
+                <div>
+                  <b>Operation</b>
+                  <span>{operation}</span>
+                </div>
+                {target !== "windows-client" && (
+                  <div>
+                    <b>Deployment content</b>
+                    <span>
+                      {includeWebFrontend
+                        ? "Backend and web application"
+                        : "Backend only"}
+                    </span>
+                  </div>
+                )}
+                {target === "compose-ssh" && (
+                  <div>
+                    <b>SSH authentication</b>
+                    <span>
+                      {sshAuthMethod === "agent"
+                        ? "OpenSSH agent/default identity"
+                        : sshAuthMethod === "private-key"
+                          ? "Runtime-only private key"
+                          : "Runtime-only password"}
+                    </span>
+                  </div>
+                )}
+                <div>
+                  <b>Safety</b>
+                  <span>
+                    {target === "windows-client"
+                      ? "Package identity, checksums, Authenticode signer, installed host security, and health are verified before completion."
+                      : "SHA-256 checksums, the GitHub build attestation, HTTPS, authentication, backup readiness, and versions are verified before completion."}
+                  </span>
+                </div>
+                {release && (
+                  <div>
+                    <b>Pinned manifest</b>
+                    <span className="mono digest">
+                      SHA-256 {release.manifestSha256}
+                    </span>
+                  </div>
+                )}
+              </div>
+              {target === "cloudflare" && (
+                <>
+                  <CloudflareCostGuide />
+                  <label className="cost-acknowledgement">
+                    <input
+                      type="checkbox"
+                      checked={costAcknowledged}
+                      onChange={(event) =>
+                        setCostAcknowledged(event.target.checked)
+                      }
+                    />
+                    I reviewed these dated allowances and understand that
+                    Cloudflare can change pricing or limits.
+                  </label>
+                  <label className="runtime-secret">
+                    Cloudflare API token
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      value={cloudflareToken}
+                      onChange={(event) =>
+                        setCloudflareToken(event.target.value)
+                      }
+                      placeholder="Used only while this application is open"
+                    />
+                    <small>
+                      This value stays in memory and is never added to the plan
+                      or diagnostics.
+                    </small>
+                  </label>
+                </>
+              )}
+              {operation === "install" &&
+                target !== "plan-only" &&
+                target !== "windows-client" && (
+                  <label className="runtime-secret">
+                    One-time owner setup code
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      minLength={16}
+                      value={bootstrapToken}
+                      onChange={(event) =>
+                        setBootstrapToken(event.target.value)
+                      }
+                      placeholder="At least 16 characters; save it until setup is complete"
+                    />
+                    <small>
+                      You will enter this code once when creating the first
+                      family owner. It stays in memory here and is never added
+                      to the plan or diagnostics.
+                    </small>
+                  </label>
+                )}
+              {operation === "uninstall" && (
+                <label className="keep-data">
+                  <input
+                    type="checkbox"
+                    checked={keepData}
+                    onChange={(event) => setKeepData(event.target.checked)}
+                  />
+                  Keep database and media volumes so the deployment can be
+                  recovered later
+                </label>
+              )}
+              {operation === "restore" && (
+                <div className="restore-warning" role="note">
+                  <strong>
+                    Restore replaces current{" "}
+                    {target === "windows-client" ? "Windows" : "server"} records
+                    and media.
+                  </strong>
+                  <p>
+                    Scout first creates a recovery backup, verifies the selected
+                    archive and target compatibility, restores the{" "}
+                    {target === "windows-client" ? "Windows data" : "server"},
+                    revokes existing sign-in sessions, and requires a passing
+                    health check.
+                  </p>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={restoreAcknowledged}
+                      onChange={(event) =>
+                        setRestoreAcknowledged(event.target.checked)
+                      }
+                    />
+                    I understand the current server data will be replaced and
+                    users must sign in again.
+                  </label>
+                </div>
+              )}
+              <details className="plan-details">
+                <summary>View the operator plan</summary>
+                <pre>{JSON.stringify(plan, null, 2)}</pre>
+              </details>
+            </>
+          )}
+          {step === 4 && (
+            <>
+              <h1>
+                {lastRunMode === "dry-run"
+                  ? "Preflight checks — nothing was changed"
+                  : runFailed
+                    ? "Scout Bee stopped safely."
+                    : `${operationHeadline(operation)} — every check shown`}
+              </h1>
+              {release && (
+                <p className="lede">
+                  Requested release: <b>ApiaryLens {release.version}</b> ·{" "}
+                  {release.channel}. Scout checks every download against the
+                  pinned release record before anything is installed.
+                </p>
+              )}
+              <div className="steps">
+                {phases.map((phase) => (
+                  <div
+                    className={
+                      "step-row" + (phase.state === "waiting" ? " dim" : "")
+                    }
+                    key={phase.name}
+                  >
+                    <span className="mark">
+                      {phase.state === "passed" ? (
+                        <span className="check" aria-hidden="true">
+                          ✓
+                        </span>
+                      ) : phase.state === "failed" ? (
+                        <span className="cross" aria-hidden="true">
+                          ✕
+                        </span>
+                      ) : (
+                        <span className="idle" aria-hidden="true"></span>
+                      )}
+                    </span>
+                    <div>
+                      <h3>
+                        {phase.name}{" "}
+                        <span
+                          className={
+                            "state " +
+                            (phase.state === "passed"
+                              ? "ok"
+                              : phase.state === "failed"
+                                ? "bad"
+                                : "wait")
+                          }
+                        >
+                          {phase.state === "passed"
+                            ? "Done"
+                            : phase.state === "failed"
+                              ? "Failed"
+                              : phase.state}
+                        </span>
+                      </h3>
+                      {phase.detail && <p>{phase.detail}</p>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {release && (
+                <div className="evidence">
+                  <div className="row">
+                    <span className="ok-word">Pinned release manifest</span>
+                    SHA-256:
+                  </div>
+                  <div className="row">
+                    <code>{release.manifestSha256}</code>
+                  </div>
+                  <div className="row muted-row">
+                    If any check had failed, Scout would have stopped there and
+                    told you. No secret values were written to the plan or log.
+                  </div>
+                </div>
+              )}
+              <div className="progress-actions">
+                {runFailed && (
+                  <button className="btn" onClick={() => void run("resume")}>
+                    Resume safely
+                  </button>
+                )}
+                <button className="btn" onClick={() => void saveDiagnostics()}>
+                  Save sanitized diagnostics
+                </button>
+              </div>
+            </>
+          )}
+          {step === 5 && (
+            <>
+              <div className="done-hero">
+                <span className="big-check" aria-hidden="true">
+                  ✓
+                </span>
+                <div>
+                  <h1>
+                    {operation === "install"
+                      ? "All set — ApiaryLens is ready"
+                      : operation === "backup"
+                        ? "Backup created and verified"
+                        : "The requested work completed"}
+                  </h1>
+                  {release && (
+                    <div className="health-line">
+                      <span className="state ok">Verified</span>
+                      The deployment reports exactly release{" "}
+                      <b>{release.version}</b> — what was requested is what is
+                      running.
+                    </div>
+                  )}
+                </div>
+              </div>
+              {backendAddress && (
+                <div className="callout">
+                  <h3>Open ApiaryLens</h3>
+                  <p>
+                    Start keeping records — hives, inspections, harvests. Your
+                    family signs in at this address.
+                  </p>
+                  <div className="act">
+                    <a
+                      className="btn primary"
+                      href={backendAddress}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open ApiaryLens
+                    </a>
+                    <code>{backendAddress}</code>
+                  </div>
+                </div>
+              )}
+              {operation !== "backup" && (
+                <div className="callout backup">
+                  <h3>
+                    {lastVerifiedBackup
+                      ? "Keep your backups current"
+                      : "Make your first backup"}
+                  </h3>
+                  <p>
+                    A backup file kept somewhere else — a USB stick, another
+                    computer — is what protects your family’s records if this
+                    deployment fails. Scout verifies every backup file after
+                    writing it.
+                  </p>
+                  <div className="act">
+                    <button className="btn primary" onClick={startBackup}>
+                      Back up now
+                    </button>
+                  </div>
+                </div>
+              )}
+              {connectionProfile ? (
+                <div className="callout">
+                  <h3>Connection file for other devices</h3>
+                  <p>
+                    The verified deployment is ready to connect the ApiaryLens
+                    apps on the family’s other devices. The connection file
+                    contains no credentials.
+                  </p>
+                  <div className="act">
+                    <button className="btn" onClick={saveConnectionProfile}>
+                      Save connection file
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="callout muted">
+                  <h3>No connection profile for this operation</h3>
+                  <p>
+                    Nothing here needs connecting, so Scout didn’t write one.
+                    Cloud and own-server installs get a secret-free connection
+                    file here to hand to the family’s other devices.
+                  </p>
+                </div>
+              )}
+              <p className="lede close-note">
+                You can close Scout now — nothing keeps running in the
+                background. Open Scout again whenever you want to update, back
+                up, restore, or repair.
+              </p>
+            </>
+          )}
+        </div>
+        <div className="footerbar">
+          {step === 1 && (
+            <span className="hint">
+              Nothing is downloaded or installed until you review the summary
+              and choose to apply it.
+            </span>
+          )}
+          {step === 3 && (
+            <button className="btn quiet" onClick={exportPlan}>
+              Export plan
+            </button>
+          )}
+          {step === 4 && (
+            <button
+              className="btn quiet"
+              onClick={() => void saveDiagnostics()}
+            >
+              Diagnostics
+            </button>
+          )}
+          {step === 5 && (
+            <span className="hint">
+              Operation history saved — no passwords or secrets in it.
+            </span>
+          )}
+          <span className="grow"></span>
+          {busy && (
+            <button className="btn danger" onClick={() => void cancel()}>
+              Cancel safely
+            </button>
+          )}
+          {step > 1 && step < 5 && (
+            <button
+              className="btn"
+              disabled={busy}
+              onClick={() => setStep(step - 1)}
+            >
+              Back
+            </button>
+          )}
+          {step === 1 && (
+            <button className="btn primary" onClick={() => setStep(2)}>
+              Next
+            </button>
+          )}
+          {step === 2 && (
+            <button className="btn primary" onClick={() => setStep(3)}>
+              Next
+            </button>
+          )}
+          {step === 3 && (
+            <>
               <button
+                className="btn"
                 disabled={
                   busy ||
                   !release ||
@@ -956,6 +1298,7 @@ function App() {
               </button>
               {target !== "plan-only" && (
                 <button
+                  className="btn primary"
                   disabled={
                     busy ||
                     !release ||
@@ -988,15 +1331,44 @@ function App() {
               )}
             </>
           )}
-          {busy && (
-            <button className="danger" onClick={() => void cancel()}>
-              Cancel safely
+          {step === 4 && (
+            <button
+              className="btn primary"
+              disabled={busy || !applyPassed}
+              onClick={() => setStep(5)}
+            >
+              Next
             </button>
           )}
-        </footer>
-      </main>
+          {step === 5 && (
+            <button className="btn primary" onClick={finishWizard}>
+              Finish
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
+}
+function operationHeadline(operation: Operation) {
+  switch (operation) {
+    case "install":
+      return "Setting up ApiaryLens";
+    case "update":
+      return "Updating ApiaryLens";
+    case "repair":
+      return "Repairing this install";
+    case "rollback":
+      return "Rolling back ApiaryLens";
+    case "backup":
+      return "Creating a verified backup";
+    case "restore":
+      return "Restoring a verified backup";
+    case "export":
+      return "Exporting owned data";
+    default:
+      return "Removing ApiaryLens";
+  }
 }
 function CloudflareCostGuide() {
   return (

@@ -4,41 +4,48 @@ export type Target =
 export type TargetDefinition = {
   id: Target;
   title: string;
-  subtitle: string;
+  flag: string;
   description: string;
+  bestFor: string;
 };
 
-// The full catalog of deployment homes Scout Bee knows how to guide.
+// The full catalog of deployment homes Scout Bee knows how to guide, in the
+// V1 "Wizard Classic" choice-card grammar (owner-selected design, 2026-07-19).
 // The Windows client target is feature-flagged: ADR 0023 (2026-07-18) ships
 // Scout bootstrap-scoped, so windows-client is hidden unless the server
 // reports SCOUT_BEE_ENABLE_WINDOWS_CLIENT is explicitly set (WIN-031).
 export const targetCatalog: readonly TargetDefinition[] = [
   {
     id: "windows-client",
-    title: "Windows app",
-    subtitle: "Standalone on this computer",
+    title: "Just on this computer",
+    flag: "Windows app",
     description:
-      "Installs or manages the signed ApiaryLens Windows application without requiring Linux, WSL, Docker, Node, or Go.",
+      "Installs or manages the ApiaryLens Windows application without requiring Linux, WSL, Docker, Node, or Go. Scout verifies the exact package identity before any lifecycle work.",
+    bestFor: "one shared family computer.",
   },
   {
     id: "cloudflare",
-    title: "Family Cloud",
-    subtitle: "Available across your devices",
+    title: "With a cloud backend",
+    flag: "Your own Cloudflare account",
     description:
-      "Runs in your own Cloudflare account. Predictably near-zero cost for a family apiary, subject to provider allowances.",
+      "ApiaryLens runs in a Cloudflare account that belongs to you, so the whole family can use it from any device. A family's records usually fit Cloudflare's free tier. You'll need a Cloudflare account and an API token during setup — Scout uses the token once and never stores it.",
+    bestFor: "a family spread across phones, tablets, and houses.",
   },
   {
     id: "compose-ssh",
-    title: "My Own Hardware or VM",
-    subtitle: "Maximum ownership and portability",
+    title: "On our own server",
+    flag: "SSH · Docker Compose",
     description:
-      "Installs the released Docker Compose package on an ordinary Linux server you control.",
+      "For a home server or NAS you already run. Scout connects over SSH, checks the server's identity fingerprint against the one you give it, and installs with Docker Compose. You look after the machine; Scout helps with installing, updating, backing up, and repairs.",
+    bestFor: "families with a confident self-hoster.",
   },
   {
     id: "plan-only",
     title: "Advanced plan",
-    subtitle: "Review or automate later",
-    description: "Creates a validated, secret-free plan without applying it.",
+    flag: "Review or automate later",
+    description:
+      "Creates a validated, secret-free deployment plan file without applying it, so you can review it or run it later.",
+    bestFor: "operators who review everything first.",
   },
 ] as const;
 

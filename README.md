@@ -33,7 +33,18 @@ artifact attestation before testing; those controls do not make it
 Authenticode-signed.
 
 Stable is the default product channel. Preview and release-candidate products appear
-only after explicit selection under **Advanced release channel**. Verified product
+only after explicit selection under **Advanced release channel**. Scout resolves each
+channel's release manifest from the official `ApiaryLens/apiarylens` GitHub Releases:
+stable resolves the newest published stable release (and fails closed while none has
+been published), while preview is pinned per Scout release to the exact tested
+product build (currently `0.1.0-preview.6`). Release downloads may follow only
+GitHub's own release-asset redirect chain. Before executing a Compose or Cloudflare
+bundle, Scout verifies the manifest-pinned SHA-256 and declared size of every
+downloaded byte and requires a repository-bound GitHub build attestation for the
+exact file name and digest, failing closed when any of these is absent. Scout checks
+the attestation record's binding over TLS to GitHub's repository-scoped endpoint;
+full Sigstore certificate-chain verification remains available through
+`gh attestation verify`. Verified product
 artifacts are cached by checksum in the user's Scout Bee cache for safe resume,
 repair, and rollback. Scout supports install, update, repair, rollback, backup,
 restore, export, and keep-data or remove-data uninstall operations.

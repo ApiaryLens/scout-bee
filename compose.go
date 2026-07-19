@@ -92,11 +92,16 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 			return []phase{failed("Prepare protected staging folder", tempErr)}, tempErr
 		}
 		defer os.RemoveAll(temp)
-		bundle, downloadErr := a.executor.downloadArtifact(ctx, artifact, temp)
+		bundle, downloadErr := a.executor.downloadVerifiedArtifact(ctx, manifest, artifact, temp)
 		if downloadErr != nil {
 			return []phase{failed("Download and verify deployment bundle", downloadErr)}, downloadErr
 		}
-		phases = append(phases, pass("Download and verify deployment bundle", "The immutable Compose bundle matches the release manifest."))
+		phases = append(phases, pass("Download and verify deployment bundle", fmt.Sprintf("The immutable Compose bundle matches the release manifest: SHA-256 %s (%d bytes).", strings.ToLower(artifact.Sha256), artifact.Bytes)))
+		attestationDetail, attestationErr := a.executor.verifyArtifactAttestation(ctx, artifact)
+		if attestationErr != nil {
+			return append(phases, failed("Verify GitHub build attestation", attestationErr)), attestationErr
+		}
+		phases = append(phases, pass("Verify GitHub build attestation", attestationDetail))
 		destination := fmt.Sprintf("%s@%s:%s", compose.User, compose.Host, remoteBundle)
 		args := []string{"-P", strconv.Itoa(compose.Port), "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + knownHosts}
 		args = append(args, auth.options...)
