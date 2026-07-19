@@ -1246,6 +1246,48 @@ func TestArtifactAttestationRequiresValidSignatureAndSigningIdentity(t *testing.
 	}
 }
 
+func TestEmptyStableChannelGuidesTowardExplicitPreviewOptIn(t *testing.T) {
+	original := officialReleaseManifestURLs
+	defer func() { officialReleaseManifestURLs = original }()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/preview.json" {
+			_, _ = w.Write([]byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.6","channel":"preview","contracts":{"deploymentPlan":1},"artifacts":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	officialReleaseManifestURLs = map[string]string{
+		"stable":  server.URL + "/stable.json",
+		"preview": server.URL + "/preview.json",
+	}
+	executor := &executor{client: server.Client()}
+
+	stableRequest := httptest.NewRequest(http.MethodGet, "/api/v1/release", nil)
+	stableResponse := httptest.NewRecorder()
+	executor.releaseHTTP(stableResponse, stableRequest)
+	if stableResponse.Code != http.StatusNotFound {
+		t.Fatalf("an empty stable channel must be reported distinctly, got %d %s", stableResponse.Code, stableResponse.Body.String())
+	}
+	var body struct {
+		Message      string `json:"message"`
+		ChannelEmpty bool   `json:"channelEmpty"`
+	}
+	if err := json.Unmarshal(stableResponse.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.ChannelEmpty || !strings.Contains(body.Message, "stable release yet") {
+		t.Fatalf("empty stable must state plainly that no stable has shipped: %+v", body)
+	}
+
+	optIn := httptest.NewRequest(http.MethodGet, "/api/v1/release?channel=preview&advanced=true", nil)
+	optInResponse := httptest.NewRecorder()
+	executor.releaseHTTP(optInResponse, optIn)
+	if optInResponse.Code != http.StatusOK || !strings.Contains(optInResponse.Body.String(), "0.1.0-preview.6") {
+		t.Fatalf("the guided preview opt-in must still resolve the published preview, got %d %s", optInResponse.Code, optInResponse.Body.String())
+	}
+}
+
 func TestOfficialReleaseChannelsPointAtLiveDistribution(t *testing.T) {
 	if got := officialReleaseManifestURLs["preview"]; got != "https://github.com/ApiaryLens/apiarylens/releases/download/v0.1.0-preview.6/release-manifest.json" {
 		t.Fatalf("preview channel must pin the exact published Preview 1 build, got %q", got)

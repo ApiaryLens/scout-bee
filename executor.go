@@ -125,11 +125,25 @@ func (e *executor) releaseHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := e.client.Do(request)
-	if err != nil || response.StatusCode != http.StatusOK {
+	if err != nil {
 		jsonResponse(w, http.StatusBadGateway, map[string]string{"message": "The official release identity is unavailable"})
 		return
 	}
 	defer response.Body.Close()
+	if channel == "stable" && response.StatusCode == http.StatusNotFound {
+		// The empty-stable edge case (owner UAT 2026-07-19): no stable
+		// ApiaryLens release has been published, so the guide must say so
+		// plainly and offer the preview opt-in instead of dead-ending.
+		jsonResponse(w, http.StatusNotFound, map[string]any{
+			"message":      "ApiaryLens has not shipped a stable release yet; previews are currently the only channel",
+			"channelEmpty": true,
+		})
+		return
+	}
+	if response.StatusCode != http.StatusOK {
+		jsonResponse(w, http.StatusBadGateway, map[string]string{"message": "The official release identity is unavailable"})
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		jsonResponse(w, http.StatusBadGateway, map[string]string{"message": "The official release identity is unreadable"})

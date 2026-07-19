@@ -94,15 +94,25 @@ const railNotes: Record<number, string> = {
 };
 
 const token = location.hash.slice(1);
+// Owner UAT finding (2026-07-19): a lost loopback backend must never surface
+// as a raw fetch error. Every Scout API call is loopback-only, so a network
+// failure means Scout's own local process is gone.
+const localServiceLost =
+  "Scout's local service stopped — close this tab and relaunch Scout Bee.";
 const call = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      ...init?.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        ...init?.headers,
+      },
+    });
+  } catch {
+    throw new Error(localServiceLost);
+  }
   const body = (await response.json().catch(() => ({}))) as {
     message?: string;
   };
@@ -162,6 +172,7 @@ function App() {
     "" | "dry-run" | "apply" | "resume"
   >("");
   const [release, setRelease] = useState<ReleaseIdentity | null>(null);
+  const [stableChannelEmpty, setStableChannelEmpty] = useState(false);
   const [history, setHistory] = useState<OperationSummary[]>([]);
   const [connectionProfile, setConnectionProfile] =
     useState<WindowsConnectionProfile | null>(null);
@@ -260,20 +271,35 @@ function App() {
   useEffect(() => {
     setRelease(null);
     setError("");
+    setStableChannelEmpty(false);
     const advanced = productChannel === "stable" ? "" : "&advanced=true";
-    void call<ReleaseIdentity>(
-      `/api/v1/release?channel=${productChannel}${advanced}`,
-    )
-      .then(setRelease)
-      .catch((caught) =>
+    void fetch(`/api/v1/release?channel=${productChannel}${advanced}`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => ({}))) as {
+          message?: string;
+          channelEmpty?: boolean;
+        } & Partial<ReleaseIdentity>;
+        if (response.ok) {
+          setRelease(body as ReleaseIdentity);
+          return;
+        }
+        // Owner UAT finding (2026-07-19): while no stable ApiaryLens release
+        // exists, say so plainly and guide toward the preview opt-in instead
+        // of dead-ending on an error.
+        if (productChannel === "stable" && body.channelEmpty === true) {
+          setStableChannelEmpty(true);
+          return;
+        }
         setError(
-          productChannel === "stable"
-            ? "No compatible Stable release is currently available. Preview and RC builds are available only through Advanced release channel opt-in."
-            : caught instanceof Error
-              ? caught.message
-              : "The release identity is unavailable",
-        ),
-      );
+          body.message ??
+            (productChannel === "stable"
+              ? "No compatible Stable release is currently available. Preview and RC builds are available only through Advanced release channel opt-in."
+              : "The release identity is unavailable"),
+        );
+      })
+      .catch(() => setError(localServiceLost));
   }, [productChannel]);
   async function refreshHistory() {
     const result = await call<{ items: OperationSummary[] }>("/api/v1/history");
@@ -532,6 +558,27 @@ function App() {
                 same ApiaryLens — only where it runs is different, and you can
                 see exactly what each one means before anything happens.
               </p>
+              {stableChannelEmpty && productChannel === "stable" && (
+                <div className="callout stable-empty" role="note">
+                  <h3>No stable release yet</h3>
+                  <p>
+                    ApiaryLens hasn’t shipped a stable release yet — previews
+                    are currently the only channel. Preview builds change
+                    frequently and aren’t for your family’s only copy of the
+                    records. Every download is still verified the same way —
+                    SHA-256 checksum and GitHub build attestation — before
+                    anything is installed.
+                  </p>
+                  <div className="act">
+                    <button
+                      className="btn primary"
+                      onClick={() => setProductChannel("preview")}
+                    >
+                      Use the Preview channel
+                    </button>
+                  </div>
+                </div>
+              )}
               <div
                 className="choices"
                 role="radiogroup"
@@ -780,12 +827,25 @@ function App() {
                   <span>
                     {release
                       ? `ApiaryLens ${release.version} · ${release.channel}`
-                      : "Resolving the official release identity…"}
+                      : stableChannelEmpty && productChannel === "stable"
+                        ? "ApiaryLens hasn’t shipped a stable release yet — previews are currently the only channel."
+                        : "Resolving the official release identity…"}
                   </span>
-                  <small>
-                    Stable is always selected by default; the Advanced release
-                    channel choice lives on the first screen.
-                  </small>
+                  {stableChannelEmpty && productChannel === "stable" ? (
+                    <div className="act">
+                      <button
+                        className="btn"
+                        onClick={() => setProductChannel("preview")}
+                      >
+                        Use the Preview channel
+                      </button>
+                    </div>
+                  ) : (
+                    <small>
+                      Stable is always selected by default; the Advanced release
+                      channel choice lives on the first screen.
+                    </small>
+                  )}
                 </div>
                 {target !== "windows-client" && target !== "compose-local" && (
                   <div

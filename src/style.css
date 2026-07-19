@@ -1070,3 +1070,13 @@ details.plan-details pre {
   padding: 6px 14px;
   font-size: 12.5px;
 }
+
+/* ---- empty-stable guidance (owner UAT 2026-07-19) ---- */
+.callout.stable-empty {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px var(--warn);
+  background: var(--warn-bg);
+}
+.callout.stable-empty h3 {
+  color: var(--warn);
+}
