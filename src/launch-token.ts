@@ -1,41 +1,20 @@
-// Resolve the Scout launch token.
+// Resolve the Scout launch token from the current URL.
 //
-// The token is minted per launch and handed to the browser as the "k" query
-// parameter (query params survive the OS URL openers on every platform; a URL
-// "#fragment" does NOT — Windows' rundll32 FileProtocolHandler strips it, which
-// left the wizard tokenless and stuck on "launch authorization is required").
+// The token is a per-launch, in-memory credential (see AGENTS.md). It is
+// deliberately NOT persisted to localStorage / sessionStorage / cookies, so it
+// never survives Scout exiting and is never exposed to a later page served on
+// the same loopback origin.
 //
-// Once seen, the token is persisted per-origin so a reload, a bare-URL tab, or
-// a second tab stays authorized instead of dead-ending on that banner. The
-// listening port is unique per launch, so a stored token never leaks across
-// Scout runs.
-export interface TokenStore {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-}
-
-export const LAUNCH_TOKEN_STORAGE_KEY = "scoutLaunchToken";
-
-export function resolveLaunchToken(
-  search: string,
-  hash: string,
-  store: TokenStore | null,
-): string {
-  const fromUrl =
+// It is delivered as the "k" query parameter rather than a URL "#fragment":
+// on Windows the opener (rundll32 url.dll,FileProtocolHandler) strips everything
+// after "#", which left the auto-opened window tokenless and stuck on "Scout Bee
+// launch authorization is required". Query params survive the OS URL openers on
+// every platform, and — unlike a fragment consumed once — they stay in the URL,
+// so reloading the launched tab keeps working. A bare-URL tab with no token
+// intentionally has none: relaunch Scout to mint a fresh one.
+export function resolveLaunchToken(search: string, hash: string): string {
+  return (
     new URLSearchParams(search).get("k") ??
-    (hash.startsWith("#") ? hash.slice(1) : hash);
-  if (fromUrl) {
-    try {
-      store?.setItem(LAUNCH_TOKEN_STORAGE_KEY, fromUrl);
-    } catch {
-      // Private mode / storage disabled — the in-URL token still works for
-      // this tab; we just can't help bare-URL tabs recover it.
-    }
-    return fromUrl;
-  }
-  try {
-    return store?.getItem(LAUNCH_TOKEN_STORAGE_KEY) ?? "";
-  } catch {
-    return "";
-  }
+    (hash.startsWith("#") ? hash.slice(1) : hash)
+  );
 }
