@@ -232,7 +232,10 @@ func TestLocalComposeApplyRunsPinnedLifecycleThroughLocalShell(t *testing.T) {
 		}
 		if bytes.Equal(current.Stdin, []byte(composeRemoteScript)) {
 			lifecycleRuns++
-			if !strings.Contains(joined, "sh -s -- install ") {
+			// On Windows "sh" appears in the arguments (wsl -e sh …); on
+			// Linux sh is the executable itself, so assert only the pinned
+			// argument order the script receives.
+			if !strings.Contains(joined, "-s -- install ") {
 				t.Fatalf("lifecycle script was not driven with the install operation: %s", joined)
 			}
 			if current.Args[len(current.Args)-1] != "8420" {
