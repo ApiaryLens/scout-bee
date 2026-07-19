@@ -2,7 +2,10 @@
 
 Scout Bee is the separately released ApiaryLens installer, updater, recovery tool,
 and deployment manager. It provides a guided interface for installing and managing
-exact ApiaryLens product releases on Windows, Cloudflare, and remote Linux hosts.
+exact ApiaryLens product releases on Windows, Cloudflare, and remote Linux hosts —
+including a local test/trial on this computer that runs the released Compose
+bundle through WSL2 with Docker on Windows, or Docker on Linux, serving plain
+HTTP on localhost only.
 
 Scout Bee and ApiaryLens have independent versions. Scout consumes immutable product
 release manifests and artifacts; it does not build or copy ApiaryLens product source.
