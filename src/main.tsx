@@ -1817,9 +1817,7 @@ function App() {
               onClick={() => void run("apply")}
             >
               Apply{" "}
-              {target === "windows-client"
-                ? "Windows lifecycle"
-                : "deployment"}
+              {target === "windows-client" ? "Windows lifecycle" : "deployment"}
             </button>
           )}
           {step === 4 && !applyPassed && !preflightPassed && (
