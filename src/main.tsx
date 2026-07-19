@@ -223,17 +223,22 @@ function App() {
   const [localFolderState, setLocalFolderState] = useState<
     "" | "checking" | "writable" | "unwritable"
   >("");
+  // The concrete folder the target shell resolved "~" to at run time — always
+  // the executing user's own home, never a name Scout guessed.
+  const [localFolderResolved, setLocalFolderResolved] = useState("");
   async function checkLocalFolder() {
     if (!form.localDirectory) return;
     setLocalFolderState("checking");
     try {
-      const result = await call<{ checked?: boolean; writable?: boolean }>(
-        "/api/v1/local/folder-check",
-        {
-          method: "POST",
-          body: JSON.stringify({ directory: form.localDirectory }),
-        },
-      );
+      const result = await call<{
+        checked?: boolean;
+        writable?: boolean;
+        resolvedPath?: string;
+      }>("/api/v1/local/folder-check", {
+        method: "POST",
+        body: JSON.stringify({ directory: form.localDirectory }),
+      });
+      setLocalFolderResolved(result.resolvedPath ?? "");
       setLocalFolderState(
         result.checked !== true
           ? ""
@@ -371,6 +376,14 @@ function App() {
       document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+  // Entering the local-trial Details step immediately resolves and checks the
+  // default folder for the runtime-detected user, so the family sees the real
+  // install location without editing anything.
+  useEffect(() => {
+    if (step === 2 && target === "compose-local") void checkLocalFolder();
+    // checkLocalFolder reads the latest form state when invoked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, target]);
   const update = (name: string, value: string) =>
     setForm((current) => ({ ...current, [name]: value }));
 
@@ -973,7 +986,10 @@ function App() {
                       )}
                       {localFolderState === "writable" && (
                         <span className="field-ok" role="status">
-                          This folder is ready to use.
+                          Ready
+                          {localFolderResolved
+                            ? ` — installs to ${localFolderResolved} for your user.`
+                            : " to use."}
                         </span>
                       )}
                     </label>

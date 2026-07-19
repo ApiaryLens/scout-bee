@@ -89,6 +89,14 @@ func TestLocalFolderCheckEndpointReportsWritability(t *testing.T) {
 	if writable.Code != http.StatusOK || !strings.Contains(writable.Body.String(), `"writable":true`) {
 		t.Fatalf("expected a writable folder verdict, got %d %s", writable.Code, writable.Body.String())
 	}
+	// The resolved path must come from the runtime environment (the shell's
+	// $HOME for whoever is running Scout), never from a name baked into Scout.
+	if !strings.Contains(writable.Body.String(), `"resolvedPath":"/home/runtime-user/apiarylens"`) {
+		t.Fatalf("expected the runtime-detected home in the verdict, got %s", writable.Body.String())
+	}
+	if strings.Contains(composeTargetPreflightScript+composeRemoteScript, "/home/") {
+		t.Fatal("no concrete /home/<user> path may be baked into the lifecycle scripts")
+	}
 	unwritable := post(&executor{runner: &composePreflightRunner{failFolderTest: true}}, `{"directory":"/opt/apiarylens"}`)
 	if unwritable.Code != http.StatusOK || !strings.Contains(unwritable.Body.String(), `"writable":false`) {
 		t.Fatalf("expected an unwritable folder verdict, got %d %s", unwritable.Code, unwritable.Body.String())
@@ -165,7 +173,15 @@ func (f *localLifecycleRunner) Run(_ context.Context, spec command, _ map[string
 		}
 		return "x86_64\nDocker Compose version v2.40.3\n", nil
 	case bytes.Equal(spec.Stdin, []byte(composeTargetPreflightScript)):
-		return "", nil
+		// Emulate the shell resolving "~" against the executing user's real
+		// home, exactly as the script's ${HOME} expansion does at run time.
+		encoded := spec.Args[len(spec.Args)-1]
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+		if decodeErr != nil {
+			return "", decodeErr
+		}
+		resolved := strings.Replace(string(decoded), "~", "/home/runtime-user", 1)
+		return resolved + "\n", nil
 	case bytes.Equal(spec.Stdin, []byte(composeRemoteScript)):
 		return "ApiaryLens 0.1.0-preview.1 is active and Docker health checks passed.\n", nil
 	default:

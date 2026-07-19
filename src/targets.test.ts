@@ -59,6 +59,12 @@ describe("per-setup install-folder defaults (owner UAT 2026-07-19)", () => {
     expect(setupDefaults["compose-local"].httpPort).toBeGreaterThan(1024);
   });
 
+  it("never bakes a concrete username into the default — the shell resolves ~ at run time", () => {
+    expect(setupDefaults["compose-local"].installDirectory).not.toMatch(
+      /\/home\/|\/Users\//,
+    );
+  });
+
   it("keeps /opt for server installs where root access is expected", () => {
     expect(setupDefaults["compose-ssh"].targetDirectory).toBe(
       "/opt/apiarylens",

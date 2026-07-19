@@ -112,8 +112,19 @@ func (e *executor) localFolderCheckHTTP(w http.ResponseWriter, r *http.Request) 
 	probe.Stdin = []byte(composeTargetPreflightScript)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	_, err := e.runner.Run(ctx, probe, nil)
-	jsonResponse(w, http.StatusOK, map[string]any{"checked": true, "writable": err == nil})
+	output, err := e.runner.Run(ctx, probe, nil)
+	result := map[string]any{"checked": true, "writable": err == nil}
+	// The probe echoes the target after the shell expanded "~" against the
+	// executing user's real $HOME, so the wizard can show the runtime-detected
+	// path without any username ever being baked into Scout.
+	if err == nil {
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		resolved := strings.TrimSpace(lines[len(lines)-1])
+		if strings.HasPrefix(resolved, "/") {
+			result["resolvedPath"] = resolved
+		}
+	}
+	jsonResponse(w, http.StatusOK, result)
 }
 
 // localShellPath translates a host path into the local shell's view of the

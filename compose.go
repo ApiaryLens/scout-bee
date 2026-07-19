@@ -470,4 +470,5 @@ else
   done
   { [ -d "$parent" ] && [ -w "$parent" ]; } || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }
 fi
+printf '%s\n' "$target"
 `
