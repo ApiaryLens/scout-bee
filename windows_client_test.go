@@ -506,23 +506,23 @@ func TestResolveInstalledWindowsPathsSelectsExactDirectAppVersion(t *testing.T) 
 	if err := os.MkdirAll(filepath.Join(root, "app-0.1.0-preview1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "app-0.1.0-preview3"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "app-0.1.0-preview6"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
 		filepath.Join(root, "Update.exe"),
 		filepath.Join(root, "app-0.1.0-preview1", "ApiaryLens.exe"),
-		filepath.Join(root, "app-0.1.0-preview3", "ApiaryLens.exe"),
+		filepath.Join(root, "app-0.1.0-preview6", "ApiaryLens.exe"),
 	} {
 		if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	paths, err := resolveInstalledWindowsPaths(root, "0.1.0-preview.3")
+	paths, err := resolveInstalledWindowsPaths(root, "0.1.0-preview.6")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(filepath.Dir(paths.Application)) != "app-0.1.0-preview3" {
+	if filepath.Base(filepath.Dir(paths.Application)) != "app-0.1.0-preview6" {
 		t.Fatalf("resolved wrong application directory: %s", paths.Application)
 	}
 	if _, err = resolveInstalledWindowsPaths(root, "0.1.0-preview.4"); err == nil {

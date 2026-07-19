@@ -79,6 +79,7 @@ type diagnosticPrivacy struct {
 var diagnosticPhaseCodes = map[string]string{
 	"Validate deployment plan":                       "plan_validated",
 	"Check release identity":                         "release_identity_verified",
+	"Verify GitHub build attestation":                "artifact_attestation_verified",
 	"Validate Windows client lifecycle plan":         "windows_plan_validated",
 	"Verify Windows lifecycle operation":             "windows_operation_supported",
 	"Verify Windows execution environment":           "windows_environment_verified",

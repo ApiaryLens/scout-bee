@@ -57,7 +57,7 @@ func (a *cloudflareAdapter) preflight(ctx context.Context, input request) ([]pha
 			return append(phases, failed("Inspect retained installation protection", inspectErr)), inspectErr
 		}
 		if !existing["AUTH_ROOT_SECRET"] && len(input.Secrets["bootstrapToken"]) < 16 {
-			err := errors.New("an owner setup code of at least 16 characters is required only while installing")
+			err := errors.New("installing needs a one-time owner setup code of at least 16 characters — go back to the Review step and enter one; Scout uses it once to protect who becomes the first family owner")
 			return append(phases, failed("Verify one-time owner setup protection", err)), err
 		}
 		if existing["AUTH_ROOT_SECRET"] {
@@ -249,11 +249,16 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 		return []phase{failed("Prepare protected staging folder", err)}, err
 	}
 	defer os.RemoveAll(temp)
-	bundle, err := a.executor.downloadArtifact(ctx, artifact, temp)
+	bundle, err := a.executor.downloadVerifiedArtifact(ctx, manifest, artifact, temp)
 	if err != nil {
 		return []phase{failed("Download and verify deployment bundle", err)}, err
 	}
-	phases := []phase{pass("Download and verify deployment bundle", "The immutable Cloudflare bundle matches the release manifest.")}
+	phases := []phase{pass("Download and verify deployment bundle", fmt.Sprintf("The immutable Cloudflare bundle matches the release manifest: SHA-256 %s (%d bytes).", strings.ToLower(artifact.Sha256), artifact.Bytes))}
+	attestationDetail, attestationErr := a.executor.verifyArtifactAttestation(ctx, artifact)
+	if attestationErr != nil {
+		return append(phases, failed("Verify GitHub build attestation", attestationErr)), attestationErr
+	}
+	phases = append(phases, pass("Verify GitHub build attestation", attestationDetail))
 	root := filepath.Join(temp, "bundle")
 	if err = os.Mkdir(root, 0o700); err == nil {
 		err = extractTarGz(bundle, root)
@@ -314,7 +319,7 @@ func (a *cloudflareAdapter) deploy(ctx context.Context, input request, manifest 
 		} else {
 			bootstrap := input.Secrets["bootstrapToken"]
 			if len(bootstrap) < 16 {
-				err = errors.New("an owner setup code of at least 16 characters is required for a fresh installation")
+				err = errors.New("a fresh installation needs a one-time owner setup code of at least 16 characters — go back to the Review step and enter one; Scout uses it once to protect who becomes the first family owner")
 				return append(phases, failed("Prepare one-time owner setup protection", err)), err
 			}
 			authRootBytes := make([]byte, 48)

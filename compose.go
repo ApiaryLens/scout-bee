@@ -17,7 +17,7 @@ type composeAdapter struct{ executor *executor }
 
 func (a *composeAdapter) preflight(ctx context.Context, input request) ([]phase, error) {
 	if input.Plan.Operation == "install" && len(input.Secrets["bootstrapToken"]) < 16 {
-		err := errors.New("an owner setup code of at least 16 characters is required only while installing")
+		err := errors.New("installing needs a one-time owner setup code of at least 16 characters — go back to the Review step and enter one; Scout uses it once to protect who becomes the first family owner")
 		return []phase{failed("Verify one-time owner setup protection", err)}, err
 	}
 	for _, tool := range []string{"ssh", "scp", "ssh-keyscan"} {
@@ -92,11 +92,16 @@ func (a *composeAdapter) apply(ctx context.Context, input request, manifest rele
 			return []phase{failed("Prepare protected staging folder", tempErr)}, tempErr
 		}
 		defer os.RemoveAll(temp)
-		bundle, downloadErr := a.executor.downloadArtifact(ctx, artifact, temp)
+		bundle, downloadErr := a.executor.downloadVerifiedArtifact(ctx, manifest, artifact, temp)
 		if downloadErr != nil {
 			return []phase{failed("Download and verify deployment bundle", downloadErr)}, downloadErr
 		}
-		phases = append(phases, pass("Download and verify deployment bundle", "The immutable Compose bundle matches the release manifest."))
+		phases = append(phases, pass("Download and verify deployment bundle", fmt.Sprintf("The immutable Compose bundle matches the release manifest: SHA-256 %s (%d bytes).", strings.ToLower(artifact.Sha256), artifact.Bytes)))
+		attestationDetail, attestationErr := a.executor.verifyArtifactAttestation(ctx, artifact)
+		if attestationErr != nil {
+			return append(phases, failed("Verify GitHub build attestation", attestationErr)), attestationErr
+		}
+		phases = append(phases, pass("Verify GitHub build attestation", attestationDetail))
 		destination := fmt.Sprintf("%s@%s:%s", compose.User, compose.Host, remoteBundle)
 		args := []string{"-P", strconv.Itoa(compose.Port), "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + knownHosts}
 		args = append(args, auth.options...)
@@ -307,6 +312,7 @@ decode() {
 }
 operation=$1
 target=$(decode "$2")
+case "$target" in "~/"*) target="${HOME}${target#\~}" ;; esac
 project=$(decode "$3")
 public_url=$(decode "$4")
 version=$(decode "$5")
@@ -319,6 +325,7 @@ build_time=$(decode "${11}")
 artifact_identity=$(decode "${12}")
 backup_retention=${13}
 include_web_frontend=${14}
+http_port=${15:-}
 prepare_target() {
   if [ -e "$target" ] || [ -L "$target" ]; then
     [ ! -L "$target" ] && [ -d "$target" ] && [ -w "$target" ] || return 73
@@ -393,6 +400,7 @@ case "$operation" in
     caddyfile=Caddyfile.backend-only
     if [ "$include_web_frontend" = true ]; then caddyfile=Caddyfile; fi
     printf 'APIARYLENS_VERSION=%s\nAPIARYLENS_SITE_ADDRESS=%s\nAPIARYLENS_BOOTSTRAP_SECRET_FILE=%s\nAPIARYLENS_AUTH_ROOT_SECRET_FILE=%s\nAPIARYLENS_SOURCE_COMMIT=%s\nAPIARYLENS_BUILD_TIME=%s\nAPIARYLENS_ARTIFACT_IDENTITY=%s\nAPIARYLENS_CADDYFILE=%s\n' "$version" "${public_url#https://}" "$secrets_dir/bootstrap-token" "$secrets_dir/auth-root" "$source_commit" "$build_time" "$artifact_identity" "$caddyfile" > "$release_dir/docker/.env"
+    if [ -n "$http_port" ]; then printf 'APIARYLENS_HTTP_PORT=%s\n' "$http_port" >> "$release_dir/docker/.env"; fi
     chmod 600 "$release_dir/docker/.env"
     ln -sfn "$release_dir" "$current.next"
     if ! docker compose -p "$project" --env-file "$release_dir/docker/.env" -f "$release_dir/docker/compose.yaml" up -d --build --wait; then
@@ -451,6 +459,7 @@ decode() {
   printf '%s' "$encoded" | base64 -d
 }
 target=$(decode "$1")
+case "$target" in "~/"*) target="${HOME}${target#\~}" ;; esac
 if [ -e "$target" ] || [ -L "$target" ]; then
   [ ! -L "$target" ] && [ -d "$target" ] && [ -w "$target" ]
   [ "$(stat -c '%u' "$target")" = "$(id -u)" ]
@@ -461,4 +470,5 @@ else
   done
   { [ -d "$parent" ] && [ -w "$parent" ]; } || { command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; }
 fi
+printf '%s\n' "$target"
 `

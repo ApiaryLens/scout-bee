@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,14 +36,61 @@ type commandRunner interface {
 
 type systemRunner struct{}
 
+// GitHub Releases on the official product repository is the live distribution
+// point for ApiaryLens Preview 1. apiarylens.org remains the declared future
+// release home; its URLs are kept only where nothing has shipped yet so the
+// flow fails closed instead of silently resolving elsewhere.
+const (
+	officialProductRepositoryURL = "https://github.com/ApiaryLens/apiarylens"
+	officialAttestationURL       = "https://api.github.com/repos/ApiaryLens/apiarylens/attestations"
+)
+
+var officialReleaseDownloadBase = officialProductRepositoryURL + "/releases/download/"
+
 var officialReleaseManifestURLs = map[string]string{
-	"stable":            "https://apiarylens.org/releases/stable/manifest.json",
+	// The newest published stable release. GitHub resolves this only when a
+	// non-prerelease release exists, so it fails closed until stable ships;
+	// the manifest identity checks below still require channel "stable".
+	"stable": officialProductRepositoryURL + "/releases/latest/download/release-manifest.json",
+	// No release candidate has been published; this fails closed today.
 	"release-candidate": "https://apiarylens.org/releases/release-candidate/manifest.json",
-	"preview":           "https://apiarylens.org/releases/0.1.0-preview.3/manifest.json",
+	// Preview is pinned to the exact published build this Scout supports.
+	"preview": officialReleaseDownloadBase + "v0.1.0-preview.6/release-manifest.json",
 }
 
+// releaseRedirectHosts are the only hosts a GitHub release download may pass
+// through: github.com release asset URLs answer with a redirect to GitHub's
+// dedicated release storage.
+var releaseRedirectHosts = map[string]bool{
+	"github.com":                           true,
+	"objects.githubusercontent.com":        true,
+	"release-assets.githubusercontent.com": true,
+}
+
+// releaseRedirectPolicy refuses every redirect except the HTTPS redirect chain
+// GitHub uses to serve release assets, and only when the request started at
+// github.com. Every downloaded artifact byte is still verified against the
+// pinned SHA-256 and declared size, so the transport cannot substitute content.
+func releaseRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 || via[0].URL.Hostname() != "github.com" {
+		return errors.New("release downloads may not redirect")
+	}
+	if len(via) > 3 {
+		return errors.New("release downloads may not redirect more than three times")
+	}
+	if req.URL.Scheme != "https" || req.URL.User != nil || !releaseRedirectHosts[req.URL.Hostname()] {
+		return errors.New("release downloads may only redirect to GitHub release storage")
+	}
+	return nil
+}
+
+// wsl and sh exist for the local-machine trial target: the same released
+// lifecycle script Scout streams to remote hosts over SSH is streamed to a
+// local POSIX shell (WSL2 on Windows, sh elsewhere). Scout never executes
+// artifact bytes directly; the script drives Docker Compose.
 var allowedExecutables = map[string]bool{
 	"wrangler": true, "ssh": true, "scp": true, "ssh-keyscan": true,
+	"wsl": true, "sh": true,
 }
 
 func (systemRunner) Find(name string) error {
@@ -74,11 +125,25 @@ func (e *executor) releaseHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := e.client.Do(request)
-	if err != nil || response.StatusCode != http.StatusOK {
+	if err != nil {
 		jsonResponse(w, http.StatusBadGateway, map[string]string{"message": "The official release identity is unavailable"})
 		return
 	}
 	defer response.Body.Close()
+	if channel == "stable" && response.StatusCode == http.StatusNotFound {
+		// The empty-stable edge case (owner UAT 2026-07-19): no stable
+		// ApiaryLens release has been published, so the guide must say so
+		// plainly and offer the preview opt-in instead of dead-ending.
+		jsonResponse(w, http.StatusNotFound, map[string]any{
+			"message":      "ApiaryLens has not shipped a stable release yet; previews are currently the only channel",
+			"channelEmpty": true,
+		})
+		return
+	}
+	if response.StatusCode != http.StatusOK {
+		jsonResponse(w, http.StatusBadGateway, map[string]string{"message": "The official release identity is unavailable"})
+		return
+	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		jsonResponse(w, http.StatusBadGateway, map[string]string{"message": "The official release identity is unreadable"})
@@ -151,6 +216,7 @@ type executor struct {
 	allowLoopback         bool
 	store                 *operationStore
 	cacheDirectory        string
+	attestationURL        string
 	windows               windowsLifecycleSystem
 	windowsStateDirectory string
 	activeMu              sync.Mutex
@@ -175,9 +241,8 @@ func newExecutor() *executor {
 		store:          newOperationStore(),
 		active:         map[string]context.CancelFunc{},
 		cacheDirectory: cacheDirectory,
-		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return errors.New("release downloads may not redirect")
-		}},
+		attestationURL: officialAttestationURL,
+		client:         &http.Client{Timeout: 30 * time.Second, CheckRedirect: releaseRedirectPolicy},
 	}
 }
 
@@ -275,6 +340,8 @@ func (e *executor) runDetailed(ctx context.Context, input request) (executionRes
 		adapter = cloudflareTarget
 	} else if input.Plan.Target == "windows-client" {
 		adapter = &windowsClientAdapter{executor: e}
+	} else if input.Plan.Target == "compose-local" {
+		adapter = &localComposeAdapter{executor: e}
 	} else {
 		adapter = &composeAdapter{executor: e}
 	}
@@ -411,6 +478,173 @@ func cachedArtifactMatches(path string, artifact manifestArtifact) bool {
 		return false
 	}
 	return strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), artifact.Sha256)
+}
+
+// downloadVerifiedArtifact downloads through the URL declared in the release
+// manifest first and falls back to the official GitHub release asset with the
+// same file name when the declared distribution point is unavailable
+// (apiarylens.org does not serve releases yet). Both paths verify every byte
+// against the SHA-256 and size pinned in the already-verified release
+// manifest, so neither source can substitute content.
+func (e *executor) downloadVerifiedArtifact(ctx context.Context, manifest releaseManifest, artifact manifestArtifact, directory string) (string, error) {
+	path, primaryErr := e.downloadArtifact(ctx, artifact, directory)
+	if primaryErr == nil {
+		return path, nil
+	}
+	fallback := artifact
+	fallback.URL = officialReleaseDownloadBase + "v" + url.PathEscape(manifest.ProductVersion) + "/" + url.PathEscape(artifact.Name)
+	if fallback.URL == artifact.URL || !safeHTTPSURL(fallback.URL) {
+		return "", primaryErr
+	}
+	path, fallbackErr := e.downloadArtifact(ctx, fallback, directory)
+	if fallbackErr != nil {
+		return "", errors.Join(primaryErr, fallbackErr)
+	}
+	return path, nil
+}
+
+// attestationPAE is the DSSE pre-authentication encoding the signature covers.
+func attestationPAE(payloadType string, payload []byte) []byte {
+	return fmt.Appendf(nil, "DSSEv1 %d %s %d %s", len(payloadType), payloadType, len(payload), payload)
+}
+
+type attestationStatement struct {
+	Type          string `json:"_type"`
+	PredicateType string `json:"predicateType"`
+	Subject       []struct {
+		Name   string            `json:"name"`
+		Digest map[string]string `json:"digest"`
+	} `json:"subject"`
+	Predicate struct {
+		BuildDefinition struct {
+			ExternalParameters struct {
+				Workflow struct {
+					Repository string `json:"repository"`
+					Path       string `json:"path"`
+				} `json:"workflow"`
+			} `json:"externalParameters"`
+		} `json:"buildDefinition"`
+	} `json:"predicate"`
+}
+
+// verifyArtifactAttestation fails closed unless GitHub's repository-scoped
+// attestation endpoint returns a provenance statement that (1) carries a DSSE
+// signature that cryptographically verifies against the ECDSA public key of
+// the Sigstore certificate embedded in the bundle, (2) names the official
+// ApiaryLens release workflow as the certificate's signing identity, and
+// (3) has a subject whose name and SHA-256 match the verified artifact.
+// Deliberately out of scope for this dependency-free executor: verifying the
+// certificate chain to the Fulcio root and the transparency-log inclusion
+// proof (the leaf certificate is minutes-lived, so wall-clock validity cannot
+// be checked at install time either). Those checks remain available to
+// operators through `gh attestation verify`.
+func (e *executor) verifyArtifactAttestation(ctx context.Context, artifact manifestArtifact) (string, error) {
+	base := e.attestationURL
+	if base == "" {
+		base = officialAttestationURL
+	}
+	requestURL := strings.TrimSuffix(base, "/") + "/sha256:" + strings.ToLower(artifact.Sha256)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	response, err := e.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("could not reach the GitHub attestation service: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("GitHub holds no build attestation for artifact %q; refusing to continue", artifact.Name)
+	}
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("the GitHub attestation service returned HTTP %d", response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		Attestations []struct {
+			Bundle struct {
+				VerificationMaterial struct {
+					Certificate struct {
+						RawBytes string `json:"rawBytes"`
+					} `json:"certificate"`
+				} `json:"verificationMaterial"`
+				DSSEEnvelope struct {
+					PayloadType string `json:"payloadType"`
+					Payload     string `json:"payload"`
+					Signatures  []struct {
+						Sig string `json:"sig"`
+					} `json:"signatures"`
+				} `json:"dsseEnvelope"`
+			} `json:"bundle"`
+		} `json:"attestations"`
+	}
+	if err = json.Unmarshal(raw, &payload); err != nil {
+		return "", errors.New("the GitHub attestation response is unreadable")
+	}
+	for _, attestation := range payload.Attestations {
+		envelope := attestation.Bundle.DSSEEnvelope
+		if envelope.PayloadType != "application/vnd.in-toto+json" {
+			continue
+		}
+		decoded, decodeErr := base64.StdEncoding.DecodeString(envelope.Payload)
+		if decodeErr != nil {
+			continue
+		}
+		certDER, certErr := base64.StdEncoding.DecodeString(attestation.Bundle.VerificationMaterial.Certificate.RawBytes)
+		if certErr != nil || len(certDER) == 0 {
+			continue
+		}
+		certificate, parseErr := x509.ParseCertificate(certDER)
+		if parseErr != nil {
+			continue
+		}
+		publicKey, isECDSA := certificate.PublicKey.(*ecdsa.PublicKey)
+		if !isECDSA {
+			continue
+		}
+		digest := sha256.Sum256(attestationPAE(envelope.PayloadType, decoded))
+		signatureVerified := false
+		for _, signature := range envelope.Signatures {
+			signatureBytes, signatureErr := base64.StdEncoding.DecodeString(signature.Sig)
+			if signatureErr == nil && ecdsa.VerifyASN1(publicKey, digest[:], signatureBytes) {
+				signatureVerified = true
+				break
+			}
+		}
+		if !signatureVerified {
+			continue
+		}
+		signingIdentityVerified := false
+		for _, identity := range certificate.URIs {
+			if strings.HasPrefix(identity.String(), officialProductRepositoryURL+"/") {
+				signingIdentityVerified = true
+				break
+			}
+		}
+		if !signingIdentityVerified {
+			continue
+		}
+		var statement attestationStatement
+		if json.Unmarshal(decoded, &statement) != nil {
+			continue
+		}
+		if statement.Type != "https://in-toto.io/Statement/v1" ||
+			statement.PredicateType != "https://slsa.dev/provenance/v1" ||
+			statement.Predicate.BuildDefinition.ExternalParameters.Workflow.Repository != officialProductRepositoryURL {
+			continue
+		}
+		for _, subject := range statement.Subject {
+			if subject.Name == artifact.Name && strings.EqualFold(subject.Digest["sha256"], artifact.Sha256) {
+				return "A Sigstore-signed provenance attestation from " + officialProductRepositoryURL +
+					" covers this exact file name and SHA-256. Scout verified the DSSE signature against the embedded certificate and its GitHub workflow signing identity; certificate-chain and transparency-log verification remain available through `gh attestation verify`.", nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no signed GitHub attestation binds artifact %q and its SHA-256 to the official ApiaryLens repository build", artifact.Name)
 }
 
 func artifactFor(manifest releaseManifest, target string) (manifestArtifact, error) {

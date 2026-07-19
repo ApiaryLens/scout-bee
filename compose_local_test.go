@@ -1,0 +1,292 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func validLocalPlan() plan {
+	p := validPlan()
+	p.Target = "compose-local"
+	p.Cloudflare = nil
+	p.LocalCompose = &localCompose{InstallDirectory: "/opt/apiarylens", ProjectName: "apiarylens-family", HTTPPort: 8420}
+	return p
+}
+
+func TestValidateLocalComposePlan(t *testing.T) {
+	if err := validate(validLocalPlan()); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*plan){
+		"missing local target":  func(p *plan) { p.LocalCompose = nil },
+		"extra cloud target":    func(p *plan) { p.Cloudflare = &cloudflare{} },
+		"root install folder":   func(p *plan) { p.LocalCompose.InstallDirectory = "/" },
+		"traversal folder":      func(p *plan) { p.LocalCompose.InstallDirectory = "/opt/../etc" },
+		"relative folder":       func(p *plan) { p.LocalCompose.InstallDirectory = "opt/apiarylens" },
+		"invalid project name":  func(p *plan) { p.LocalCompose.ProjectName = "Bad Name!" },
+		"invalid http port":     func(p *plan) { p.LocalCompose.HTTPPort = 0 },
+		"port above valid span": func(p *plan) { p.LocalCompose.HTTPPort = 70000 },
+	} {
+		p := validLocalPlan()
+		mutate(&p)
+		if err := validate(p); err == nil {
+			t.Fatalf("%s must be rejected", name)
+		}
+	}
+}
+
+func TestLocalTrialAcceptsHomeRelativeInstallFolder(t *testing.T) {
+	p := validLocalPlan()
+	p.LocalCompose.InstallDirectory = "~/apiarylens"
+	if err := validate(p); err != nil {
+		t.Fatalf("the home-relative default folder must validate: %v", err)
+	}
+	for _, bad := range []string{"~", "~/", "~/../etc", "~/apiarylens/"} {
+		p.LocalCompose.InstallDirectory = bad
+		if err := validate(p); err == nil {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+	ssh := validPlan()
+	ssh.Target = "compose-ssh"
+	ssh.Cloudflare = nil
+	ssh.Compose = &compose{
+		Host: "hives.example", Port: 22, User: "beekeeper", PublicURL: "https://hives.example",
+		TargetDirectory: "~/apiarylens", ProjectName: "apiarylens-family",
+		SSHHostKeySha256: "SHA256:abc", BackupRetention: 14,
+	}
+	if err := validate(ssh); err == nil {
+		t.Fatal("compose-ssh must keep absolute-only install folders")
+	}
+}
+
+func TestLifecycleScriptsExpandHomeRelativeTarget(t *testing.T) {
+	for _, script := range []string{composeRemoteScript, composeTargetPreflightScript} {
+		if !strings.Contains(script, `case "$target" in "~/"*) target="${HOME}${target#\~}" ;; esac`) {
+			t.Fatal("lifecycle scripts must expand a home-relative install folder to $HOME")
+		}
+	}
+}
+
+func TestLocalFolderCheckEndpointReportsWritability(t *testing.T) {
+	post := func(e *executor, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/local/folder-check", strings.NewReader(body))
+		response := httptest.NewRecorder()
+		e.localFolderCheckHTTP(response, request)
+		return response
+	}
+	writable := post(&executor{runner: &localLifecycleRunner{}}, `{"directory":"~/apiarylens"}`)
+	if writable.Code != http.StatusOK || !strings.Contains(writable.Body.String(), `"writable":true`) {
+		t.Fatalf("expected a writable folder verdict, got %d %s", writable.Code, writable.Body.String())
+	}
+	// The resolved path must come from the runtime environment (the shell's
+	// $HOME for whoever is running Scout), never from a name baked into Scout.
+	if !strings.Contains(writable.Body.String(), `"resolvedPath":"/home/runtime-user/apiarylens"`) {
+		t.Fatalf("expected the runtime-detected home in the verdict, got %s", writable.Body.String())
+	}
+	if strings.Contains(composeTargetPreflightScript+composeRemoteScript, "/home/") {
+		t.Fatal("no concrete /home/<user> path may be baked into the lifecycle scripts")
+	}
+	unwritable := post(&executor{runner: &composePreflightRunner{failFolderTest: true}}, `{"directory":"/opt/apiarylens"}`)
+	if unwritable.Code != http.StatusOK || !strings.Contains(unwritable.Body.String(), `"writable":false`) {
+		t.Fatalf("expected an unwritable folder verdict, got %d %s", unwritable.Code, unwritable.Body.String())
+	}
+	unsafe := post(&executor{runner: &localLifecycleRunner{}}, `{"directory":"/opt/../etc"}`)
+	if unsafe.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe folders must be refused, got %d", unsafe.Code)
+	}
+	noShell := post(&executor{runner: missingShellRunner{}}, `{"directory":"~/apiarylens"}`)
+	if noShell.Code != http.StatusOK || !strings.Contains(noShell.Body.String(), `"checked":false`) {
+		t.Fatalf("a missing local shell must report checked=false, got %d %s", noShell.Code, noShell.Body.String())
+	}
+	brokenShell := post(&executor{runner: brokenShellRunner{}}, `{"directory":"~/apiarylens"}`)
+	if brokenShell.Code != http.StatusOK || !strings.Contains(brokenShell.Body.String(), `"checked":false`) {
+		t.Fatalf("a present-but-broken shell (e.g. WSL with no distribution) must report checked=false, not unwritable, got %d %s", brokenShell.Code, brokenShell.Body.String())
+	}
+}
+
+// brokenShellRunner models wsl.exe existing while no distribution is
+// installed: the executable is found but every invocation fails.
+type brokenShellRunner struct{}
+
+func (brokenShellRunner) Find(string) error { return nil }
+func (brokenShellRunner) Run(context.Context, command, map[string]string) (string, error) {
+	return "", errors.New("no installed distributions")
+}
+
+type missingShellRunner struct{}
+
+func (missingShellRunner) Find(string) error { return errors.New("not found") }
+func (missingShellRunner) Run(context.Context, command, map[string]string) (string, error) {
+	return "", errors.New("must not run")
+}
+
+func TestMissingOwnerSetupCodeSaysWhereToFixIt(t *testing.T) {
+	adapters := map[string]targetAdapter{
+		"compose-local": &localComposeAdapter{executor: &executor{runner: &localLifecycleRunner{}}},
+		"compose-ssh":   &composeAdapter{executor: &executor{runner: &localLifecycleRunner{}}},
+	}
+	plans := map[string]plan{"compose-local": validLocalPlan(), "compose-ssh": func() plan {
+		p := validPlan()
+		p.Target = "compose-ssh"
+		p.Cloudflare = nil
+		p.Compose = &compose{PublicURL: "https://hives.example", TargetDirectory: "/opt/apiarylens", SSHHostKeySha256: "SHA256:abc"}
+		return p
+	}()}
+	for name, adapter := range adapters {
+		phases, err := adapter.preflight(context.Background(), request{Plan: plans[name], Secrets: map[string]string{}})
+		if err == nil || !strings.Contains(err.Error(), "Review step") || !strings.Contains(err.Error(), "first family owner") {
+			t.Fatalf("%s owner-code failure must say where and why to fix it, err=%v phases=%+v", name, err, phases)
+		}
+	}
+}
+
+func TestLocalComposePreflightGivesHonestDockerGuidance(t *testing.T) {
+	adapter := &localComposeAdapter{executor: &executor{runner: missingShellRunner{}}}
+	phases, err := adapter.preflight(context.Background(), request{
+		Plan: validLocalPlan(), Secrets: map[string]string{"bootstrapToken": "owner-setup-code-long-enough"},
+	})
+	if err == nil || len(phases) != 1 || phases[0].State != "failed" ||
+		!strings.Contains(err.Error(), "Docker") {
+		t.Fatalf("expected honest Docker guidance, err=%v phases=%+v", err, phases)
+	}
+}
+
+type localLifecycleRunner struct {
+	commands    []command
+	dockerProbe string
+}
+
+func (f *localLifecycleRunner) Find(tool string) error {
+	if tool != "wsl" && tool != "sh" {
+		return fmt.Errorf("unexpected local tool %q", tool)
+	}
+	return nil
+}
+
+func (f *localLifecycleRunner) Run(_ context.Context, spec command, _ map[string]string) (string, error) {
+	f.commands = append(f.commands, spec)
+	joined := strings.Join(spec.Args, " ")
+	switch {
+	case strings.Contains(joined, "wslpath"):
+		return "/mnt/c/translated/" + strings.ReplaceAll(spec.Args[len(spec.Args)-1], "\\", "/"), nil
+	case bytes.Equal(spec.Stdin, []byte(localDockerProbeScript)):
+		if f.dockerProbe != "" {
+			return f.dockerProbe, nil
+		}
+		return "x86_64\nDocker Compose version v2.40.3\n", nil
+	case bytes.Equal(spec.Stdin, []byte(composeTargetPreflightScript)):
+		// Emulate the shell resolving "~" against the executing user's real
+		// home, exactly as the script's ${HOME} expansion does at run time.
+		encoded := spec.Args[len(spec.Args)-1]
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+		if decodeErr != nil {
+			return "", decodeErr
+		}
+		resolved := strings.Replace(string(decoded), "~", "/home/runtime-user", 1)
+		return resolved + "\n", nil
+	case bytes.Equal(spec.Stdin, []byte(composeRemoteScript)):
+		return "ApiaryLens 0.1.0-preview.1 is active and Docker health checks passed.\n", nil
+	default:
+		return "", nil
+	}
+}
+
+func TestLocalComposePreflightReportsDockerAndFolderReadiness(t *testing.T) {
+	runner := &localLifecycleRunner{}
+	adapter := &localComposeAdapter{executor: &executor{runner: runner}}
+	phases, err := adapter.preflight(context.Background(), request{
+		Plan: validLocalPlan(), Secrets: map[string]string{"bootstrapToken": "owner-setup-code-long-enough"},
+	})
+	if err != nil || len(phases) != 3 {
+		t.Fatalf("expected three passing local preflight phases, err=%v phases=%+v", err, phases)
+	}
+	if !strings.Contains(phases[2].Detail, "http://localhost:8420") || !strings.Contains(phases[2].Detail, "this computer only") {
+		t.Fatalf("local-only exposure phase must state the honest localhost boundary: %+v", phases[2])
+	}
+}
+
+func TestLocalComposeApplyRunsPinnedLifecycleThroughLocalShell(t *testing.T) {
+	bundle := []byte("verified compose release bundle")
+	bundleDigest := sha256.Sum256(bundle)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/bundle.tar.gz":
+			_, _ = w.Write(bundle)
+		case r.URL.Path == "/health":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-preview.1"})
+		case strings.HasPrefix(r.URL.Path, "/attestations/"):
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(bundleDigest[:])}))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	manifest := releaseManifest{
+		Product: "ApiaryLens", ProductVersion: "0.1.0-preview.1", Channel: "preview",
+		Artifacts: []manifestArtifact{{
+			Name: "bundle.tar.gz", Kind: "deployment-bundle", Target: "compose",
+			URL: server.URL + "/bundle.tar.gz", Sha256: hex.EncodeToString(bundleDigest[:]), Bytes: int64(len(bundle)),
+		}},
+	}
+	runner := &localLifecycleRunner{}
+	adapter := &localComposeAdapter{
+		executor:      &executor{runner: runner, client: server.Client(), cacheDirectory: t.TempDir(), attestationURL: server.URL + "/attestations"},
+		healthAddress: server.URL + "/health",
+	}
+	secrets := map[string]string{"bootstrapToken": "runtime-only-owner-setup-code"}
+	phases, err := adapter.apply(context.Background(), request{Plan: validLocalPlan(), Mode: "apply", Secrets: secrets}, manifest)
+	if err != nil || len(phases) != 6 {
+		t.Fatalf("local apply failed: err=%v phases=%+v", err, phases)
+	}
+	expectedShell := localShellName()
+	lifecycleRuns := 0
+	for _, current := range runner.commands {
+		if current.Executable != expectedShell {
+			t.Fatalf("local lifecycle invoked unexpected executable %q", current.Executable)
+		}
+		joined := strings.Join(current.Args, " ")
+		if strings.Contains(joined, secrets["bootstrapToken"]) || strings.Contains(joined, secrets["authRootSecret"]) {
+			t.Fatalf("runtime secret leaked into process arguments: %s", joined)
+		}
+		if bytes.Equal(current.Stdin, []byte(composeRemoteScript)) {
+			lifecycleRuns++
+			// On Windows "sh" appears in the arguments (wsl -e sh …); on
+			// Linux sh is the executable itself, so assert only the pinned
+			// argument order the script receives.
+			if !strings.Contains(joined, "-s -- install ") {
+				t.Fatalf("lifecycle script was not driven with the install operation: %s", joined)
+			}
+			if current.Args[len(current.Args)-1] != "8420" {
+				t.Fatalf("local HTTP port was not passed as the final script argument: %s", joined)
+			}
+			if !strings.Contains(joined, base64.RawURLEncoding.EncodeToString([]byte("http://localhost"))) {
+				t.Fatalf("local trial must target plain-HTTP localhost: %s", joined)
+			}
+		}
+	}
+	if lifecycleRuns != 1 {
+		t.Fatalf("expected exactly one lifecycle script run, got %d", lifecycleRuns)
+	}
+}
+
+func TestComposeLifecycleScriptSupportsOptionalLocalHTTPPort(t *testing.T) {
+	for _, required := range []string{
+		`http_port=${15:-}`,
+		`if [ -n "$http_port" ]; then printf 'APIARYLENS_HTTP_PORT=%s\n' "$http_port" >> "$release_dir/docker/.env"; fi`,
+	} {
+		if !strings.Contains(composeRemoteScript, required) {
+			t.Fatalf("Compose lifecycle script is missing %q", required)
+		}
+	}
+}

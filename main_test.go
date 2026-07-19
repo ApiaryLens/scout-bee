@@ -6,14 +6,20 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -210,7 +216,7 @@ func TestReleaseChannelRequiresAdvancedOptInForPreview(t *testing.T) {
 		version := "0.1.0"
 		if r.URL.Path == "/preview.json" {
 			channel = "preview"
-			version = "0.1.0-preview.3"
+			version = "0.1.0-preview.6"
 		}
 		_, _ = fmt.Fprintf(w, `{"product":"ApiaryLens","productVersion":%q,"channel":%q,"contracts":{"deploymentPlan":1},"artifacts":[]}`, version, channel)
 	}))
@@ -418,11 +424,13 @@ func TestComposeWindowsSideLifecycleUsesPinnedArgumentArraysAndExactHealth(t *te
 	sourceCommit := strings.Repeat("a", 40)
 	buildTime := "2026-07-17T18:00:00Z"
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/bundle.tar.gz":
+		switch {
+		case r.URL.Path == "/bundle.tar.gz":
 			_, _ = w.Write(bundle)
-		case "/health":
+		case r.URL.Path == "/health":
 			_, _ = fmt.Fprintf(w, `{"status":"ok","product":"ApiaryLens","version":"0.1.0-preview.1","build":{"sourceCommit":%q,"buildTime":%q,"artifactIdentity":"ApiaryLens@0.1.0-preview.1+aaaaaaa"}}`, sourceCommit, buildTime)
+		case strings.HasPrefix(r.URL.Path, "/attestations/"):
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(bundleDigest[:])}))
 		default:
 			http.NotFound(w, r)
 		}
@@ -448,7 +456,7 @@ func TestComposeWindowsSideLifecycleUsesPinnedArgumentArraysAndExactHealth(t *te
 			URL: server.URL + "/bundle.tar.gz", Sha256: hex.EncodeToString(bundleDigest[:]), Bytes: int64(len(bundle)),
 		}},
 	}
-	executor := &executor{client: server.Client(), cacheDirectory: t.TempDir(), runner: runner}
+	executor := &executor{client: server.Client(), cacheDirectory: t.TempDir(), runner: runner, attestationURL: server.URL + "/attestations"}
 	adapter := &composeAdapter{executor: executor}
 	input := request{Plan: p, Secrets: map[string]string{"bootstrapToken": "runtime-only-owner-setup-code"}}
 	preflight, err := adapter.preflight(context.Background(), input)
@@ -456,8 +464,11 @@ func TestComposeWindowsSideLifecycleUsesPinnedArgumentArraysAndExactHealth(t *te
 		t.Fatalf("Windows-side Compose preflight failed: err=%v phases=%+v", err, preflight)
 	}
 	phases, err := adapter.apply(context.Background(), input, manifest)
-	if err != nil || len(phases) != 6 {
+	if err != nil || len(phases) != 7 {
 		t.Fatalf("Windows-side Compose apply failed: err=%v phases=%+v", err, phases)
+	}
+	if phases[1].Name != "Verify GitHub build attestation" || phases[1].State != "passed" {
+		t.Fatalf("expected a passing attestation phase after download, got %+v", phases[1])
 	}
 
 	var scpPinned, remoteLifecycle, protectedSecretStreams int
@@ -623,14 +634,14 @@ func TestPlanJSONUsesVersionedCamelCaseContract(t *testing.T) {
 }
 
 func TestFetchManifestVerifiesPinnedChecksum(t *testing.T) {
-	manifest := []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.3","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[]}`)
+	manifest := []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.6","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[]}`)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(manifest) }))
 	defer server.Close()
 	digest := sha256.Sum256(manifest)
 	executor := newExecutor()
 	executor.allowLoopback = true
 	p := validPlan()
-	p.Release.Version = "0.1.0-preview.3"
+	p.Release.Version = "0.1.0-preview.6"
 	p.Release.Channel = "preview"
 	p.Release.ManifestURL = server.URL
 	p.Release.ManifestSha256 = hex.EncodeToString(digest[:])
@@ -656,27 +667,29 @@ func TestCloudflareApplyUsesVerifiedBundleAndRuntimeSecret(t *testing.T) {
 	artifactDigest := sha256.Sum256(artifact)
 	var manifest []byte
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/manifest.json":
+		switch {
+		case r.URL.Path == "/manifest.json":
 			_, _ = w.Write(manifest)
-		case "/bundle.tar.gz":
+		case r.URL.Path == "/bundle.tar.gz":
 			_, _ = w.Write(artifact)
-		case "/health":
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-preview.3"})
+		case r.URL.Path == "/health":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-preview.6"})
+		case strings.HasPrefix(r.URL.Path, "/attestations/"):
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(artifactDigest[:])}))
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
-	manifest = []byte(fmt.Sprintf(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.3","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[{"name":"bundle.tar.gz","kind":"deployment-bundle","target":"cloudflare","url":%q,"sha256":"%s","bytes":%d}]}`, server.URL+"/bundle.tar.gz", hex.EncodeToString(artifactDigest[:]), len(artifact)))
+	manifest = []byte(fmt.Sprintf(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.6","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[{"name":"bundle.tar.gz","kind":"deployment-bundle","target":"cloudflare","url":%q,"sha256":"%s","bytes":%d}]}`, server.URL+"/bundle.tar.gz", hex.EncodeToString(artifactDigest[:]), len(artifact)))
 	manifestDigest := sha256.Sum256(manifest)
 	p := validPlan()
-	p.Release.Version = "0.1.0-preview.3"
+	p.Release.Version = "0.1.0-preview.6"
 	p.Release.Channel = "preview"
 	p.Release.ManifestURL = server.URL + "/manifest.json"
 	p.Release.ManifestSha256 = hex.EncodeToString(manifestDigest[:])
 	runner := &fakeRunner{}
-	deploymentExecutor := &executor{runner: runner, client: server.Client()}
+	deploymentExecutor := &executor{runner: runner, client: server.Client(), attestationURL: server.URL + "/attestations"}
 	// Add the health URL as the requested custom domain so deploy output parsing is not needed.
 	p.Cloudflare.CustomDomain = server.URL
 	phases, err := deploymentExecutor.run(context.Background(), request{Plan: p, Mode: "apply", Secrets: map[string]string{"cloudflareApiToken": "runtime-only-token", "bootstrapToken": "runtime-owner-code-only"}})
@@ -704,7 +717,7 @@ func TestCloudflareApplyUsesVerifiedBundleAndRuntimeSecret(t *testing.T) {
 	}
 
 	reinstallRunner := &fakeRunner{existingSecretNames: []string{"AUTH_ROOT_SECRET"}}
-	reinstallPhases, err := (&executor{runner: reinstallRunner, client: server.Client()}).run(
+	reinstallPhases, err := (&executor{runner: reinstallRunner, client: server.Client(), attestationURL: server.URL + "/attestations"}).run(
 		context.Background(),
 		request{Plan: p, Mode: "apply", Secrets: map[string]string{"cloudflareApiToken": "runtime-only-token"}},
 	)
@@ -752,10 +765,10 @@ func TestCloudflareBackupUsesTemporaryAuthorizationAndWritesVerifiedArchive(t *t
 		}
 	}))
 	defer server.Close()
-	releaseManifest = []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.3","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[]}`)
+	releaseManifest = []byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.6","channel":"preview","contracts":{"api":"1.0","sync":1,"databaseMigration":"0004","deploymentPlan":1},"artifacts":[]}`)
 	digest := sha256.Sum256(releaseManifest)
 	p := validPlan()
-	p.Release.Version = "0.1.0-preview.3"
+	p.Release.Version = "0.1.0-preview.6"
 	p.Release.Channel = "preview"
 	p.Operation = "backup"
 	p.Cloudflare.CustomDomain = server.URL
@@ -799,13 +812,15 @@ func TestCloudflareUpdateRequiresVerifiedBackupBeforeMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/bundle.tar.gz":
+		switch {
+		case r.URL.Path == "/bundle.tar.gz":
 			_, _ = w.Write(artifact)
-		case "/api/v1/operator/backup":
+		case r.URL.Path == "/api/v1/operator/backup":
 			_, _ = w.Write(backup.Bytes())
-		case "/health":
+		case r.URL.Path == "/health":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-rc.1"})
+		case strings.HasPrefix(r.URL.Path, "/attestations/"):
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(artifactDigest[:])}))
 		default:
 			http.NotFound(w, r)
 		}
@@ -815,7 +830,7 @@ func TestCloudflareUpdateRequiresVerifiedBackupBeforeMigration(t *testing.T) {
 	p.Operation = "update"
 	p.Cloudflare.CustomDomain = server.URL
 	runner := &fakeRunner{}
-	adapter := &cloudflareAdapter{executor: &executor{runner: runner, client: server.Client()}}
+	adapter := &cloudflareAdapter{executor: &executor{runner: runner, client: server.Client(), attestationURL: server.URL + "/attestations"}}
 	manifest := releaseManifest{
 		Product: "ApiaryLens", ProductVersion: "0.1.0-rc.1",
 		Artifacts: []manifestArtifact{{
@@ -1011,4 +1026,278 @@ func testTarGz(t *testing.T, files map[string]string) []byte {
 		t.Fatal(err)
 	}
 	return result.Bytes()
+}
+
+// testAttestationJSON builds a GitHub attestation-API response whose DSSE
+// payload is an in-toto SLSA provenance statement for the given artifacts,
+// signed over the DSSE PAE with a fresh ECDSA key whose self-signed
+// certificate names certRepository's release workflow as signing identity.
+func testAttestationJSON(t *testing.T, payloadRepository, certRepository string, artifacts ...manifestArtifact) []byte {
+	t.Helper()
+	subjects := make([]map[string]any, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		subjects = append(subjects, map[string]any{"name": artifact.Name, "digest": map[string]string{"sha256": strings.ToLower(artifact.Sha256)}})
+	}
+	statement := map[string]any{
+		"_type":         "https://in-toto.io/Statement/v1",
+		"predicateType": "https://slsa.dev/provenance/v1",
+		"subject":       subjects,
+		"predicate": map[string]any{"buildDefinition": map[string]any{"externalParameters": map[string]any{"workflow": map[string]any{
+			"repository": payloadRepository, "path": ".github/workflows/release-signing.yml", "ref": "refs/heads/main",
+		}}}},
+	}
+	payload, err := json.Marshal(statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := url.Parse(certRepository + "/.github/workflows/release-signing.yml@refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), URIs: []*url.URL{identity}}
+	certDER, err := x509.CreateCertificate(cryptorand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(attestationPAE("application/vnd.in-toto+json", payload))
+	signature, err := ecdsa.SignASN1(cryptorand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(map[string]any{"attestations": []map[string]any{{"bundle": map[string]any{
+		"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+		"verificationMaterial": map[string]any{
+			"certificate": map[string]string{"rawBytes": base64.StdEncoding.EncodeToString(certDER)},
+		},
+		"dsseEnvelope": map[string]any{
+			"payloadType": "application/vnd.in-toto+json",
+			"payload":     base64.StdEncoding.EncodeToString(payload),
+			"signatures":  []map[string]string{{"sig": base64.StdEncoding.EncodeToString(signature)}},
+		},
+	}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestReleaseRedirectPolicyAllowsOnlyGitHubReleaseChain(t *testing.T) {
+	mustRequest := func(raw string) *http.Request {
+		request, err := http.NewRequest(http.MethodGet, raw, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return request
+	}
+	origin := mustRequest("https://github.com/ApiaryLens/apiarylens/releases/download/v0.1.0-preview.6/release-manifest.json")
+	if err := releaseRedirectPolicy(mustRequest("https://release-assets.githubusercontent.com/github-production-release-asset/x"), []*http.Request{origin}); err != nil {
+		t.Fatalf("GitHub release storage redirect must be allowed: %v", err)
+	}
+	if err := releaseRedirectPolicy(mustRequest("https://github.com/ApiaryLens/apiarylens/releases/download/v1/x"), []*http.Request{origin}); err != nil {
+		t.Fatalf("github.com to github.com redirect must be allowed: %v", err)
+	}
+	for name, chain := range map[string]struct {
+		target string
+		via    []*http.Request
+	}{
+		"non-github origin":        {"https://release-assets.githubusercontent.com/x", []*http.Request{mustRequest("https://apiarylens.org/releases/stable/manifest.json")}},
+		"unlisted redirect target": {"https://evil.example.com/x", []*http.Request{origin}},
+		"http downgrade":           {"http://release-assets.githubusercontent.com/x", []*http.Request{origin}},
+		"too many redirects":       {"https://github.com/x", []*http.Request{origin, origin, origin, origin}},
+	} {
+		if err := releaseRedirectPolicy(mustRequest(chain.target), chain.via); err == nil {
+			t.Fatalf("%s must be refused", name)
+		}
+	}
+}
+
+func TestArtifactDownloadFallsBackToOfficialGitHubRelease(t *testing.T) {
+	payload := []byte("released artifact bytes")
+	digest := sha256.Sum256(payload)
+	primaryAttempts := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/declared/bundle.tar.gz":
+			primaryAttempts++
+			http.NotFound(w, r)
+		case "/download/v0.1.0-preview.6/bundle.tar.gz":
+			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	originalBase := officialReleaseDownloadBase
+	defer func() { officialReleaseDownloadBase = originalBase }()
+	officialReleaseDownloadBase = server.URL + "/download/"
+	manifest := releaseManifest{Product: "ApiaryLens", ProductVersion: "0.1.0-preview.6"}
+	artifact := manifestArtifact{
+		Name: "bundle.tar.gz", Kind: "deployment-bundle", Target: "compose",
+		URL: server.URL + "/declared/bundle.tar.gz", Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(payload)),
+	}
+	executor := &executor{client: server.Client(), cacheDirectory: t.TempDir()}
+	path, err := executor.downloadVerifiedArtifact(context.Background(), manifest, artifact, t.TempDir())
+	if err != nil {
+		t.Fatalf("fallback download failed: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(raw, payload) {
+		t.Fatalf("fallback did not produce the verified artifact bytes: %v", err)
+	}
+	if primaryAttempts == 0 {
+		t.Fatal("the declared manifest URL must be attempted first")
+	}
+}
+
+func TestArtifactAttestationVerificationFailsClosed(t *testing.T) {
+	payload := []byte("released artifact bytes")
+	digest := sha256.Sum256(payload)
+	artifact := manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(payload))}
+	cases := map[string]http.HandlerFunc{
+		"missing attestation": func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		},
+		"foreign repository": func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write(testAttestationJSON(t, "https://github.com/attacker/mirror", "https://github.com/attacker/mirror", artifact))
+		},
+		"digest mismatch": func(w http.ResponseWriter, r *http.Request) {
+			other := artifact
+			other.Sha256 = strings.Repeat("f", 64)
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, other))
+		},
+		"name mismatch": func(w http.ResponseWriter, r *http.Request) {
+			other := artifact
+			other.Name = "different.tar.gz"
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, other))
+		},
+	}
+	for name, handler := range cases {
+		server := httptest.NewServer(handler)
+		executor := &executor{client: server.Client(), attestationURL: server.URL + "/attestations"}
+		if _, err := executor.verifyArtifactAttestation(context.Background(), artifact); err == nil {
+			t.Fatalf("%s must fail closed", name)
+		}
+		server.Close()
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, artifact))
+	}))
+	defer server.Close()
+	executor := &executor{client: server.Client(), attestationURL: server.URL + "/attestations"}
+	detail, err := executor.verifyArtifactAttestation(context.Background(), artifact)
+	if err != nil {
+		t.Fatalf("matching repository-bound attestation must pass: %v", err)
+	}
+	if !strings.Contains(detail, officialProductRepositoryURL) || !strings.Contains(detail, "verified the DSSE signature") ||
+		!strings.Contains(detail, "certificate-chain and transparency-log verification remain available") {
+		t.Fatalf("attestation evidence must state exactly what was verified: %s", detail)
+	}
+}
+
+func TestArtifactAttestationRequiresValidSignatureAndSigningIdentity(t *testing.T) {
+	payload := []byte("released artifact bytes")
+	digest := sha256.Sum256(payload)
+	artifact := manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(payload))}
+	valid := testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, artifact)
+	mutate := func(change func(map[string]any)) []byte {
+		var document map[string]any
+		if err := json.Unmarshal(valid, &document); err != nil {
+			t.Fatal(err)
+		}
+		bundle := document["attestations"].([]any)[0].(map[string]any)["bundle"].(map[string]any)
+		change(bundle)
+		raw, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	cases := map[string][]byte{
+		"unsigned envelope": mutate(func(bundle map[string]any) {
+			bundle["dsseEnvelope"].(map[string]any)["signatures"] = []any{}
+		}),
+		"tampered payload": mutate(func(bundle map[string]any) {
+			envelope := bundle["dsseEnvelope"].(map[string]any)
+			decoded, err := base64.StdEncoding.DecodeString(envelope["payload"].(string))
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope["payload"] = base64.StdEncoding.EncodeToString(append(decoded, ' '))
+		}),
+		"missing certificate": mutate(func(bundle map[string]any) {
+			delete(bundle, "verificationMaterial")
+		}),
+		"foreign signing identity": testAttestationJSON(t, officialProductRepositoryURL, "https://github.com/attacker/mirror", artifact),
+	}
+	for name, response := range cases {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(response)
+		}))
+		executor := &executor{client: server.Client(), attestationURL: server.URL + "/attestations"}
+		_, err := executor.verifyArtifactAttestation(context.Background(), artifact)
+		server.Close()
+		if err == nil {
+			t.Fatalf("%s must fail closed", name)
+		}
+	}
+}
+
+func TestEmptyStableChannelGuidesTowardExplicitPreviewOptIn(t *testing.T) {
+	original := officialReleaseManifestURLs
+	defer func() { officialReleaseManifestURLs = original }()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/preview.json" {
+			_, _ = w.Write([]byte(`{"product":"ApiaryLens","productVersion":"0.1.0-preview.6","channel":"preview","contracts":{"deploymentPlan":1},"artifacts":[]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	officialReleaseManifestURLs = map[string]string{
+		"stable":  server.URL + "/stable.json",
+		"preview": server.URL + "/preview.json",
+	}
+	executor := &executor{client: server.Client()}
+
+	stableRequest := httptest.NewRequest(http.MethodGet, "/api/v1/release", nil)
+	stableResponse := httptest.NewRecorder()
+	executor.releaseHTTP(stableResponse, stableRequest)
+	if stableResponse.Code != http.StatusNotFound {
+		t.Fatalf("an empty stable channel must be reported distinctly, got %d %s", stableResponse.Code, stableResponse.Body.String())
+	}
+	var body struct {
+		Message      string `json:"message"`
+		ChannelEmpty bool   `json:"channelEmpty"`
+	}
+	if err := json.Unmarshal(stableResponse.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.ChannelEmpty || !strings.Contains(body.Message, "stable release yet") {
+		t.Fatalf("empty stable must state plainly that no stable has shipped: %+v", body)
+	}
+
+	optIn := httptest.NewRequest(http.MethodGet, "/api/v1/release?channel=preview&advanced=true", nil)
+	optInResponse := httptest.NewRecorder()
+	executor.releaseHTTP(optInResponse, optIn)
+	if optInResponse.Code != http.StatusOK || !strings.Contains(optInResponse.Body.String(), "0.1.0-preview.6") {
+		t.Fatalf("the guided preview opt-in must still resolve the published preview, got %d %s", optInResponse.Code, optInResponse.Body.String())
+	}
+}
+
+func TestOfficialReleaseChannelsPointAtLiveDistribution(t *testing.T) {
+	if got := officialReleaseManifestURLs["preview"]; got != "https://github.com/ApiaryLens/apiarylens/releases/download/v0.1.0-preview.6/release-manifest.json" {
+		t.Fatalf("preview channel must pin the exact published Preview 1 build, got %q", got)
+	}
+	if got := officialReleaseManifestURLs["stable"]; got != "https://github.com/ApiaryLens/apiarylens/releases/latest/download/release-manifest.json" {
+		t.Fatalf("stable channel must resolve the newest published stable release, got %q", got)
+	}
+	for channel, manifestURL := range officialReleaseManifestURLs {
+		if !safeHTTPSURL(manifestURL) {
+			t.Fatalf("channel %s manifest URL is not safe HTTPS: %q", channel, manifestURL)
+		}
+	}
 }
