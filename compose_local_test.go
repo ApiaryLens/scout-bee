@@ -109,6 +109,19 @@ func TestLocalFolderCheckEndpointReportsWritability(t *testing.T) {
 	if noShell.Code != http.StatusOK || !strings.Contains(noShell.Body.String(), `"checked":false`) {
 		t.Fatalf("a missing local shell must report checked=false, got %d %s", noShell.Code, noShell.Body.String())
 	}
+	brokenShell := post(&executor{runner: brokenShellRunner{}}, `{"directory":"~/apiarylens"}`)
+	if brokenShell.Code != http.StatusOK || !strings.Contains(brokenShell.Body.String(), `"checked":false`) {
+		t.Fatalf("a present-but-broken shell (e.g. WSL with no distribution) must report checked=false, not unwritable, got %d %s", brokenShell.Code, brokenShell.Body.String())
+	}
+}
+
+// brokenShellRunner models wsl.exe existing while no distribution is
+// installed: the executable is found but every invocation fails.
+type brokenShellRunner struct{}
+
+func (brokenShellRunner) Find(string) error { return nil }
+func (brokenShellRunner) Run(context.Context, command, map[string]string) (string, error) {
+	return "", errors.New("no installed distributions")
 }
 
 type missingShellRunner struct{}

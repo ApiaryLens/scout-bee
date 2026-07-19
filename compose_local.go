@@ -104,14 +104,22 @@ func (e *executor) localFolderCheckHTTP(w http.ResponseWriter, r *http.Request) 
 		jsonResponse(w, http.StatusBadRequest, map[string]string{"message": "The folder path is unsafe"})
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	// A machine without a working local shell (no WSL distribution, no sh)
+	// must report "not checked", not "not writable": preflight owns the
+	// honest Docker/WSL guidance for that case.
 	if err := e.runner.Find(localShellName()); err != nil {
+		jsonResponse(w, http.StatusOK, map[string]any{"checked": false})
+		return
+	}
+	trivial := localShellCommand("sh", "-c", "true")
+	if _, err := e.runner.Run(ctx, trivial, nil); err != nil {
 		jsonResponse(w, http.StatusOK, map[string]any{"checked": false})
 		return
 	}
 	probe := localShellCommand("sh", "-s", "--", base64.RawURLEncoding.EncodeToString([]byte(input.Directory)))
 	probe.Stdin = []byte(composeTargetPreflightScript)
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
 	output, err := e.runner.Run(ctx, probe, nil)
 	result := map[string]any{"checked": true, "writable": err == nil}
 	// The probe echoes the target after the shell expanded "~" against the
