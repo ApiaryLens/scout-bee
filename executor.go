@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -82,8 +84,13 @@ func releaseRedirectPolicy(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// wsl and sh exist for the local-machine trial target: the same released
+// lifecycle script Scout streams to remote hosts over SSH is streamed to a
+// local POSIX shell (WSL2 on Windows, sh elsewhere). Scout never executes
+// artifact bytes directly; the script drives Docker Compose.
 var allowedExecutables = map[string]bool{
 	"wrangler": true, "ssh": true, "scp": true, "ssh-keyscan": true,
+	"wsl": true, "sh": true,
 }
 
 func (systemRunner) Find(name string) error {
@@ -319,6 +326,8 @@ func (e *executor) runDetailed(ctx context.Context, input request) (executionRes
 		adapter = cloudflareTarget
 	} else if input.Plan.Target == "windows-client" {
 		adapter = &windowsClientAdapter{executor: e}
+	} else if input.Plan.Target == "compose-local" {
+		adapter = &localComposeAdapter{executor: e}
 	} else {
 		adapter = &composeAdapter{executor: e}
 	}
@@ -480,6 +489,11 @@ func (e *executor) downloadVerifiedArtifact(ctx context.Context, manifest releas
 	return path, nil
 }
 
+// attestationPAE is the DSSE pre-authentication encoding the signature covers.
+func attestationPAE(payloadType string, payload []byte) []byte {
+	return fmt.Appendf(nil, "DSSEv1 %d %s %d %s", len(payloadType), payloadType, len(payload), payload)
+}
+
 type attestationStatement struct {
 	Type          string `json:"_type"`
 	PredicateType string `json:"predicateType"`
@@ -500,11 +514,15 @@ type attestationStatement struct {
 }
 
 // verifyArtifactAttestation fails closed unless GitHub's repository-scoped
-// attestation endpoint returns a provenance statement whose subject name and
-// SHA-256 match the verified artifact and whose producing workflow belongs to
-// the official ApiaryLens repository. Scout checks the record's binding over
-// TLS to GitHub; full Sigstore certificate-chain verification is deliberately
-// out of scope for this dependency-free executor and remains available to
+// attestation endpoint returns a provenance statement that (1) carries a DSSE
+// signature that cryptographically verifies against the ECDSA public key of
+// the Sigstore certificate embedded in the bundle, (2) names the official
+// ApiaryLens release workflow as the certificate's signing identity, and
+// (3) has a subject whose name and SHA-256 match the verified artifact.
+// Deliberately out of scope for this dependency-free executor: verifying the
+// certificate chain to the Fulcio root and the transparency-log inclusion
+// proof (the leaf certificate is minutes-lived, so wall-clock validity cannot
+// be checked at install time either). Those checks remain available to
 // operators through `gh attestation verify`.
 func (e *executor) verifyArtifactAttestation(ctx context.Context, artifact manifestArtifact) (string, error) {
 	base := e.attestationURL
@@ -535,9 +553,17 @@ func (e *executor) verifyArtifactAttestation(ctx context.Context, artifact manif
 	var payload struct {
 		Attestations []struct {
 			Bundle struct {
+				VerificationMaterial struct {
+					Certificate struct {
+						RawBytes string `json:"rawBytes"`
+					} `json:"certificate"`
+				} `json:"verificationMaterial"`
 				DSSEEnvelope struct {
 					PayloadType string `json:"payloadType"`
 					Payload     string `json:"payload"`
+					Signatures  []struct {
+						Sig string `json:"sig"`
+					} `json:"signatures"`
 				} `json:"dsseEnvelope"`
 			} `json:"bundle"`
 		} `json:"attestations"`
@@ -554,6 +580,40 @@ func (e *executor) verifyArtifactAttestation(ctx context.Context, artifact manif
 		if decodeErr != nil {
 			continue
 		}
+		certDER, certErr := base64.StdEncoding.DecodeString(attestation.Bundle.VerificationMaterial.Certificate.RawBytes)
+		if certErr != nil || len(certDER) == 0 {
+			continue
+		}
+		certificate, parseErr := x509.ParseCertificate(certDER)
+		if parseErr != nil {
+			continue
+		}
+		publicKey, isECDSA := certificate.PublicKey.(*ecdsa.PublicKey)
+		if !isECDSA {
+			continue
+		}
+		digest := sha256.Sum256(attestationPAE(envelope.PayloadType, decoded))
+		signatureVerified := false
+		for _, signature := range envelope.Signatures {
+			signatureBytes, signatureErr := base64.StdEncoding.DecodeString(signature.Sig)
+			if signatureErr == nil && ecdsa.VerifyASN1(publicKey, digest[:], signatureBytes) {
+				signatureVerified = true
+				break
+			}
+		}
+		if !signatureVerified {
+			continue
+		}
+		signingIdentityVerified := false
+		for _, identity := range certificate.URIs {
+			if strings.HasPrefix(identity.String(), officialProductRepositoryURL+"/") {
+				signingIdentityVerified = true
+				break
+			}
+		}
+		if !signingIdentityVerified {
+			continue
+		}
 		var statement attestationStatement
 		if json.Unmarshal(decoded, &statement) != nil {
 			continue
@@ -565,12 +625,12 @@ func (e *executor) verifyArtifactAttestation(ctx context.Context, artifact manif
 		}
 		for _, subject := range statement.Subject {
 			if subject.Name == artifact.Name && strings.EqualFold(subject.Digest["sha256"], artifact.Sha256) {
-				return "GitHub holds a repository-bound provenance attestation from " + officialProductRepositoryURL +
-					" for this exact file name and SHA-256. Scout verified the record's binding; the signature chain is served and enforced by GitHub.", nil
+				return "A Sigstore-signed provenance attestation from " + officialProductRepositoryURL +
+					" covers this exact file name and SHA-256. Scout verified the DSSE signature against the embedded certificate and its GitHub workflow signing identity; certificate-chain and transparency-log verification remain available through `gh attestation verify`.", nil
 			}
 		}
 	}
-	return "", fmt.Errorf("no GitHub attestation binds artifact %q and its SHA-256 to the official ApiaryLens repository build", artifact.Name)
+	return "", fmt.Errorf("no signed GitHub attestation binds artifact %q and its SHA-256 to the official ApiaryLens repository build", artifact.Name)
 }
 
 func artifactFor(manifest releaseManifest, target string) (manifestArtifact, error) {

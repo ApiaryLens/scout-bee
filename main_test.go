@@ -6,14 +6,20 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -424,7 +430,7 @@ func TestComposeWindowsSideLifecycleUsesPinnedArgumentArraysAndExactHealth(t *te
 		case r.URL.Path == "/health":
 			_, _ = fmt.Fprintf(w, `{"status":"ok","product":"ApiaryLens","version":"0.1.0-preview.1","build":{"sourceCommit":%q,"buildTime":%q,"artifactIdentity":"ApiaryLens@0.1.0-preview.1+aaaaaaa"}}`, sourceCommit, buildTime)
 		case strings.HasPrefix(r.URL.Path, "/attestations/"):
-			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(bundleDigest[:])}))
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(bundleDigest[:])}))
 		default:
 			http.NotFound(w, r)
 		}
@@ -669,7 +675,7 @@ func TestCloudflareApplyUsesVerifiedBundleAndRuntimeSecret(t *testing.T) {
 		case r.URL.Path == "/health":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-preview.6"})
 		case strings.HasPrefix(r.URL.Path, "/attestations/"):
-			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(artifactDigest[:])}))
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(artifactDigest[:])}))
 		default:
 			http.NotFound(w, r)
 		}
@@ -814,7 +820,7 @@ func TestCloudflareUpdateRequiresVerifiedBackupBeforeMigration(t *testing.T) {
 		case r.URL.Path == "/health":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "product": "ApiaryLens", "version": "0.1.0-rc.1"})
 		case strings.HasPrefix(r.URL.Path, "/attestations/"):
-			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(artifactDigest[:])}))
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(artifactDigest[:])}))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1023,8 +1029,10 @@ func testTarGz(t *testing.T, files map[string]string) []byte {
 }
 
 // testAttestationJSON builds a GitHub attestation-API response whose DSSE
-// payload is an in-toto SLSA provenance statement for the given artifacts.
-func testAttestationJSON(t *testing.T, repository string, artifacts ...manifestArtifact) []byte {
+// payload is an in-toto SLSA provenance statement for the given artifacts,
+// signed over the DSSE PAE with a fresh ECDSA key whose self-signed
+// certificate names certRepository's release workflow as signing identity.
+func testAttestationJSON(t *testing.T, payloadRepository, certRepository string, artifacts ...manifestArtifact) []byte {
 	t.Helper()
 	subjects := make([]map[string]any, 0, len(artifacts))
 	for _, artifact := range artifacts {
@@ -1035,18 +1043,40 @@ func testAttestationJSON(t *testing.T, repository string, artifacts ...manifestA
 		"predicateType": "https://slsa.dev/provenance/v1",
 		"subject":       subjects,
 		"predicate": map[string]any{"buildDefinition": map[string]any{"externalParameters": map[string]any{"workflow": map[string]any{
-			"repository": repository, "path": ".github/workflows/release-signing.yml", "ref": "refs/heads/main",
+			"repository": payloadRepository, "path": ".github/workflows/release-signing.yml", "ref": "refs/heads/main",
 		}}}},
 	}
 	payload, err := json.Marshal(statement)
 	if err != nil {
 		t.Fatal(err)
 	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := url.Parse(certRepository + "/.github/workflows/release-signing.yml@refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), URIs: []*url.URL{identity}}
+	certDER, err := x509.CreateCertificate(cryptorand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(attestationPAE("application/vnd.in-toto+json", payload))
+	signature, err := ecdsa.SignASN1(cryptorand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
 	raw, err := json.Marshal(map[string]any{"attestations": []map[string]any{{"bundle": map[string]any{
 		"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
-		"dsseEnvelope": map[string]string{
+		"verificationMaterial": map[string]any{
+			"certificate": map[string]string{"rawBytes": base64.StdEncoding.EncodeToString(certDER)},
+		},
+		"dsseEnvelope": map[string]any{
 			"payloadType": "application/vnd.in-toto+json",
 			"payload":     base64.StdEncoding.EncodeToString(payload),
+			"signatures":  []map[string]string{{"sig": base64.StdEncoding.EncodeToString(signature)}},
 		},
 	}}}})
 	if err != nil {
@@ -1132,17 +1162,17 @@ func TestArtifactAttestationVerificationFailsClosed(t *testing.T) {
 			http.NotFound(w, r)
 		},
 		"foreign repository": func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write(testAttestationJSON(t, "https://github.com/attacker/mirror", artifact))
+			_, _ = w.Write(testAttestationJSON(t, "https://github.com/attacker/mirror", "https://github.com/attacker/mirror", artifact))
 		},
 		"digest mismatch": func(w http.ResponseWriter, r *http.Request) {
 			other := artifact
 			other.Sha256 = strings.Repeat("f", 64)
-			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, other))
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, other))
 		},
 		"name mismatch": func(w http.ResponseWriter, r *http.Request) {
 			other := artifact
 			other.Name = "different.tar.gz"
-			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, other))
+			_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, other))
 		},
 	}
 	for name, handler := range cases {
@@ -1154,7 +1184,7 @@ func TestArtifactAttestationVerificationFailsClosed(t *testing.T) {
 		server.Close()
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, artifact))
+		_, _ = w.Write(testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, artifact))
 	}))
 	defer server.Close()
 	executor := &executor{client: server.Client(), attestationURL: server.URL + "/attestations"}
@@ -1162,8 +1192,57 @@ func TestArtifactAttestationVerificationFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("matching repository-bound attestation must pass: %v", err)
 	}
-	if !strings.Contains(detail, officialProductRepositoryURL) || !strings.Contains(detail, "signature chain is served and enforced by GitHub") {
+	if !strings.Contains(detail, officialProductRepositoryURL) || !strings.Contains(detail, "verified the DSSE signature") ||
+		!strings.Contains(detail, "certificate-chain and transparency-log verification remain available") {
 		t.Fatalf("attestation evidence must state exactly what was verified: %s", detail)
+	}
+}
+
+func TestArtifactAttestationRequiresValidSignatureAndSigningIdentity(t *testing.T) {
+	payload := []byte("released artifact bytes")
+	digest := sha256.Sum256(payload)
+	artifact := manifestArtifact{Name: "bundle.tar.gz", Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(payload))}
+	valid := testAttestationJSON(t, officialProductRepositoryURL, officialProductRepositoryURL, artifact)
+	mutate := func(change func(map[string]any)) []byte {
+		var document map[string]any
+		if err := json.Unmarshal(valid, &document); err != nil {
+			t.Fatal(err)
+		}
+		bundle := document["attestations"].([]any)[0].(map[string]any)["bundle"].(map[string]any)
+		change(bundle)
+		raw, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	cases := map[string][]byte{
+		"unsigned envelope": mutate(func(bundle map[string]any) {
+			bundle["dsseEnvelope"].(map[string]any)["signatures"] = []any{}
+		}),
+		"tampered payload": mutate(func(bundle map[string]any) {
+			envelope := bundle["dsseEnvelope"].(map[string]any)
+			decoded, err := base64.StdEncoding.DecodeString(envelope["payload"].(string))
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope["payload"] = base64.StdEncoding.EncodeToString(append(decoded, ' '))
+		}),
+		"missing certificate": mutate(func(bundle map[string]any) {
+			delete(bundle, "verificationMaterial")
+		}),
+		"foreign signing identity": testAttestationJSON(t, officialProductRepositoryURL, "https://github.com/attacker/mirror", artifact),
+	}
+	for name, response := range cases {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(response)
+		}))
+		executor := &executor{client: server.Client(), attestationURL: server.URL + "/attestations"}
+		_, err := executor.verifyArtifactAttestation(context.Background(), artifact)
+		server.Close()
+		if err == nil {
+			t.Fatalf("%s must fail closed", name)
+		}
 	}
 }
 

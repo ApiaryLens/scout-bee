@@ -324,6 +324,7 @@ build_time=$(decode "${11}")
 artifact_identity=$(decode "${12}")
 backup_retention=${13}
 include_web_frontend=${14}
+http_port=${15:-}
 prepare_target() {
   if [ -e "$target" ] || [ -L "$target" ]; then
     [ ! -L "$target" ] && [ -d "$target" ] && [ -w "$target" ] || return 73
@@ -398,6 +399,7 @@ case "$operation" in
     caddyfile=Caddyfile.backend-only
     if [ "$include_web_frontend" = true ]; then caddyfile=Caddyfile; fi
     printf 'APIARYLENS_VERSION=%s\nAPIARYLENS_SITE_ADDRESS=%s\nAPIARYLENS_BOOTSTRAP_SECRET_FILE=%s\nAPIARYLENS_AUTH_ROOT_SECRET_FILE=%s\nAPIARYLENS_SOURCE_COMMIT=%s\nAPIARYLENS_BUILD_TIME=%s\nAPIARYLENS_ARTIFACT_IDENTITY=%s\nAPIARYLENS_CADDYFILE=%s\n' "$version" "${public_url#https://}" "$secrets_dir/bootstrap-token" "$secrets_dir/auth-root" "$source_commit" "$build_time" "$artifact_identity" "$caddyfile" > "$release_dir/docker/.env"
+    if [ -n "$http_port" ]; then printf 'APIARYLENS_HTTP_PORT=%s\n' "$http_port" >> "$release_dir/docker/.env"; fi
     chmod 600 "$release_dir/docker/.env"
     ln -sfn "$release_dir" "$current.next"
     if ! docker compose -p "$project" --env-file "$release_dir/docker/.env" -f "$release_dir/docker/compose.yaml" up -d --build --wait; then

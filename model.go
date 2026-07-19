@@ -57,6 +57,16 @@ type windowsClient struct {
 	Architecture string `json:"architecture"`
 }
 
+// localCompose is the owner-directed "on this local machine" trial target
+// (2026-07-19): the released Compose bundle run on this computer through
+// WSL2/Docker Desktop on Windows or Docker on Linux. It serves plain HTTP on
+// localhost only and never presents connected/sync options (design v2 §1c).
+type localCompose struct {
+	InstallDirectory string `json:"installDirectory"`
+	ProjectName      string `json:"projectName"`
+	HTTPPort         int    `json:"httpPort"`
+}
+
 type plan struct {
 	SchemaVersion       int            `json:"schemaVersion"`
 	PlanID              string         `json:"planId"`
@@ -67,6 +77,7 @@ type plan struct {
 	Target              string         `json:"target"`
 	Cloudflare          *cloudflare    `json:"cloudflare,omitempty"`
 	Compose             *compose       `json:"compose,omitempty"`
+	LocalCompose        *localCompose  `json:"localCompose,omitempty"`
 	WindowsClient       *windowsClient `json:"windowsClient,omitempty"`
 }
 
@@ -211,7 +222,7 @@ func validate(p plan) error {
 	}
 	switch p.Target {
 	case "cloudflare":
-		if p.Cloudflare == nil || p.Compose != nil || p.WindowsClient != nil {
+		if p.Cloudflare == nil || p.Compose != nil || p.LocalCompose != nil || p.WindowsClient != nil {
 			return errors.New("exactly one Cloudflare target is required")
 		}
 		if !accountID.MatchString(p.Cloudflare.AccountReference) || !resourceName.MatchString(p.Cloudflare.WorkerName) || !strings.HasPrefix(p.Cloudflare.WorkerName, "apiarylens-") ||
@@ -225,7 +236,7 @@ func validate(p plan) error {
 			return errors.New("the Cloudflare custom domain must be a complete HTTPS address")
 		}
 	case "compose-ssh":
-		if p.Compose == nil || p.Cloudflare != nil || p.WindowsClient != nil {
+		if p.Compose == nil || p.Cloudflare != nil || p.LocalCompose != nil || p.WindowsClient != nil {
 			return errors.New("exactly one Compose target is required")
 		}
 		if !sshName.MatchString(p.Compose.Host) || !sshName.MatchString(p.Compose.User) || !resourceName.MatchString(p.Compose.ProjectName) {
@@ -242,11 +253,25 @@ func validate(p plan) error {
 		if !strings.HasPrefix(p.Compose.SSHHostKeySha256, "SHA256:") {
 			return errors.New("a verified SSH host key is required")
 		}
+	case "compose-local":
+		if p.LocalCompose == nil || p.Cloudflare != nil || p.Compose != nil || p.WindowsClient != nil {
+			return errors.New("exactly one local trial target is required")
+		}
+		if !resourceName.MatchString(p.LocalCompose.ProjectName) {
+			return errors.New("the local trial project name contains unsupported characters")
+		}
+		if !remotePath.MatchString(p.LocalCompose.InstallDirectory) || strings.Contains(p.LocalCompose.InstallDirectory, "..") ||
+			p.LocalCompose.InstallDirectory == "/" || path.Clean(p.LocalCompose.InstallDirectory) != p.LocalCompose.InstallDirectory {
+			return errors.New("the local trial install folder is unsafe")
+		}
+		if p.LocalCompose.HTTPPort < 1 || p.LocalCompose.HTTPPort > 65535 {
+			return errors.New("the local trial HTTP port is invalid")
+		}
 	case "windows-client":
 		if !windowsClientEnabled() {
 			return errors.New("the Windows client target is disabled in this build; set SCOUT_BEE_ENABLE_WINDOWS_CLIENT=1 to enable it explicitly")
 		}
-		if p.WindowsClient == nil || p.Cloudflare != nil || p.Compose != nil {
+		if p.WindowsClient == nil || p.Cloudflare != nil || p.Compose != nil || p.LocalCompose != nil {
 			return errors.New("exactly one Windows client target is required")
 		}
 		if p.WindowsClient.Architecture != "x64" {

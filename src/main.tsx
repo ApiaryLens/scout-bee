@@ -38,6 +38,15 @@ type OperationSummary = {
   finishedAt?: string;
 };
 
+type ScoutUpdateStatus = {
+  updateAvailable: boolean;
+  currentVersion: string;
+  latestVersion?: string;
+  releaseUrl?: string;
+  assetName?: string;
+  assetSha256?: string;
+};
+
 type WindowsConnectionProfile = {
   schemaVersion: 1;
   profileId: string;
@@ -160,6 +169,11 @@ function App() {
   // server explicitly reports SCOUT_BEE_ENABLE_WINDOWS_CLIENT (ADR 0023).
   const [windowsClientEnabled, setWindowsClientEnabled] = useState(false);
   const [scoutVersion, setScoutVersion] = useState("");
+  // On-open Scout self-update check (ADR 0023: run-on-demand, no auto-update,
+  // no background anything). Checked once at launch; fails quietly offline.
+  const [scoutUpdate, setScoutUpdate] = useState<ScoutUpdateStatus | null>(
+    null,
+  );
   const [theme, setTheme] = useState<ThemeMode>("auto");
   const [form, setForm] = useState<Record<string, string>>({
     accountReference: "",
@@ -176,6 +190,8 @@ function App() {
     projectName: "apiarylens-family",
     publicUrl: "https://hives.example.com",
     sshHostKeySha256: "",
+    localDirectory: "/opt/apiarylens",
+    localHttpPort: "8420",
   });
   const plan = useMemo(
     () => ({
@@ -193,35 +209,43 @@ function App() {
       operation,
       keepDataOnUninstall: keepData,
       target: target === "plan-only" ? "cloudflare" : target,
-      ...(target === "compose-ssh"
+      ...(target === "compose-local"
         ? {
-            compose: {
-              host: form.host,
-              port: 22,
-              user: form.user,
-              targetDirectory: form.targetDirectory,
+            localCompose: {
+              installDirectory: form.localDirectory,
               projectName: form.projectName,
-              publicUrl: form.publicUrl,
-              sshHostKeySha256: form.sshHostKeySha256,
-              backupRetention: 14,
-              includeWebFrontend,
+              httpPort: Number.parseInt(form.localHttpPort, 10) || 8420,
             },
           }
-        : target === "windows-client"
-          ? { windowsClient: { architecture: "x64" } }
-          : {
-              cloudflare: {
-                accountReference: form.accountReference,
-                workerName: form.workerName,
-                d1DatabaseName: form.d1DatabaseName,
-                r2BucketName: form.r2BucketName,
-                ...(form.customDomain
-                  ? { customDomain: form.customDomain }
-                  : {}),
-                costProfile: "family-free-guarded",
+        : target === "compose-ssh"
+          ? {
+              compose: {
+                host: form.host,
+                port: 22,
+                user: form.user,
+                targetDirectory: form.targetDirectory,
+                projectName: form.projectName,
+                publicUrl: form.publicUrl,
+                sshHostKeySha256: form.sshHostKeySha256,
+                backupRetention: 14,
                 includeWebFrontend,
               },
-            }),
+            }
+          : target === "windows-client"
+            ? { windowsClient: { architecture: "x64" } }
+            : {
+                cloudflare: {
+                  accountReference: form.accountReference,
+                  workerName: form.workerName,
+                  d1DatabaseName: form.d1DatabaseName,
+                  r2BucketName: form.r2BucketName,
+                  ...(form.customDomain
+                    ? { customDomain: form.customDomain }
+                    : {}),
+                  costProfile: "family-free-guarded",
+                  includeWebFrontend,
+                },
+              }),
     }),
     [
       target,
@@ -266,6 +290,13 @@ function App() {
         setWindowsClientEnabled(status.windowsClientEnabled === true);
         if (typeof status.version === "string") setScoutVersion(status.version);
       })
+      .catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    void call<ScoutUpdateStatus>("/api/v1/scout-update")
+      .then((status) =>
+        setScoutUpdate(status.updateAvailable === true ? status : null),
+      )
       .catch(() => undefined);
   }, []);
   useEffect(() => {
@@ -414,8 +445,17 @@ function App() {
   );
   const lastRestore = history.find((item) => item.operation === "restore");
   const runFailed = phases.some((phase) => phase.state === "failed");
+  // A successful resume completes the interrupted apply (codex P2 finding).
   const applyPassed =
-    lastRunMode === "apply" && phases.length > 0 && !runFailed;
+    (lastRunMode === "apply" || lastRunMode === "resume") &&
+    phases.length > 0 &&
+    !runFailed;
+  // Health evidence may only be claimed when a health-verification phase
+  // actually passed in this run (codex P2 finding): backup, export, and
+  // uninstall never establish it.
+  const healthVerified = phases.some(
+    (phase) => phase.state === "passed" && /health/i.test(phase.name),
+  );
   const lifecycleOperation =
     operation === "install" ||
     operation === "update" ||
@@ -426,9 +466,11 @@ function App() {
     (lifecycleOperation
       ? target === "compose-ssh"
         ? form.publicUrl
-        : target === "cloudflare" && form.customDomain
-          ? form.customDomain
-          : ""
+        : target === "compose-local"
+          ? `http://localhost:${Number.parseInt(form.localHttpPort, 10) || 8420}`
+          : target === "cloudflare" && form.customDomain
+            ? form.customDomain
+            : ""
       : "");
   const nextThemeLabel =
     theme === "auto" ? "Auto" : theme === "light" ? "Light" : "Dark";
@@ -495,28 +537,132 @@ function App() {
                 role="radiogroup"
                 aria-label="Setup choices"
               >
-                {availableTargets(windowsClientEnabled).map((definition) => (
-                  <button
-                    className={
-                      "choice" + (target === definition.id ? " selected" : "")
-                    }
-                    role="radio"
-                    aria-checked={target === definition.id}
-                    key={definition.id}
-                    onClick={() => setTarget(definition.id)}
-                  >
-                    <span className="radio" aria-hidden="true"></span>
-                    <h2>
-                      {definition.title}{" "}
-                      <span className="flag">{definition.flag}</span>
-                    </h2>
-                    <p>{definition.description}</p>
-                    <span className="best">
-                      <b>Best for:</b> {definition.bestFor}
-                    </span>
-                  </button>
-                ))}
+                <div
+                  className={
+                    "choice compound" +
+                    (target === "compose-local" || target === "windows-client"
+                      ? " selected"
+                      : "")
+                  }
+                >
+                  <span className="radio" aria-hidden="true"></span>
+                  <h2>
+                    On this local machine{" "}
+                    <span className="flag">No server needed</span>
+                  </h2>
+                  <p>
+                    Everything stays on this computer at http://localhost —
+                    nothing is uploaded anywhere and there is nothing to sign up
+                    for. Because this computer holds the only copy, Scout will
+                    help you make backup files — they are your safety net.
+                  </p>
+                  <div className="sub-choices">
+                    {availableTargets(windowsClientEnabled)
+                      .filter(
+                        (definition) =>
+                          definition.id === "compose-local" ||
+                          definition.id === "windows-client",
+                      )
+                      .map((definition) => (
+                        <button
+                          className={
+                            "sub-choice" +
+                            (target === definition.id ? " selected" : "")
+                          }
+                          role="radio"
+                          aria-checked={target === definition.id}
+                          key={definition.id}
+                          onClick={() => setTarget(definition.id)}
+                        >
+                          <span className="radio small" aria-hidden="true" />
+                          <b>
+                            {definition.title}{" "}
+                            <span className="flag">{definition.flag}</span>
+                          </b>
+                          <p>{definition.description}</p>
+                        </button>
+                      ))}
+                    {!windowsClientEnabled && (
+                      <div
+                        className="sub-choice placeholder"
+                        aria-disabled="true"
+                      >
+                        <span className="radio small" aria-hidden="true" />
+                        <b>
+                          Windows app{" "}
+                          <span className="flag soon">Coming soon</span>
+                        </b>
+                        <p>
+                          A native Windows application without Docker or WSL. It
+                          is being rewritten and ships in a later phase — shown
+                          here so you know it&#39;s planned, but it can&#39;t be
+                          chosen yet.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                  <span className="best">
+                    <b>Best for:</b> one shared family computer, or trying
+                    ApiaryLens out.
+                  </span>
+                </div>
+                {availableTargets(windowsClientEnabled)
+                  .filter(
+                    (definition) =>
+                      definition.id !== "compose-local" &&
+                      definition.id !== "windows-client",
+                  )
+                  .map((definition) => (
+                    <button
+                      className={
+                        "choice" + (target === definition.id ? " selected" : "")
+                      }
+                      role="radio"
+                      aria-checked={target === definition.id}
+                      key={definition.id}
+                      onClick={() => setTarget(definition.id)}
+                    >
+                      <span className="radio" aria-hidden="true"></span>
+                      <h2>
+                        {definition.title}{" "}
+                        <span className="flag">{definition.flag}</span>
+                      </h2>
+                      <p>{definition.description}</p>
+                      <span className="best">
+                        <b>Best for:</b> {definition.bestFor}
+                      </span>
+                    </button>
+                  ))}
               </div>
+              {scoutUpdate && (
+                <div className="update-note" role="note">
+                  <span className="flag soon">Scout update</span>
+                  <p>
+                    Scout Bee {scoutUpdate.latestVersion} is available (you have{" "}
+                    {scoutUpdate.currentVersion}). Scout never updates itself or
+                    runs in the background — download it from the official
+                    release page when you choose, and verify the SHA-256 before
+                    running it
+                    {scoutUpdate.assetSha256 ? (
+                      <>
+                        : <code>{scoutUpdate.assetSha256}</code>
+                      </>
+                    ) : (
+                      " against the release's SHA256SUMS file."
+                    )}
+                  </p>
+                  {scoutUpdate.releaseUrl && (
+                    <a
+                      className="btn"
+                      href={scoutUpdate.releaseUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open release page
+                    </a>
+                  )}
+                </div>
+              )}
               <details className="adv">
                 <summary>Advanced release channel</summary>
                 <div className="adv-body">
@@ -641,7 +787,7 @@ function App() {
                     channel choice lives on the first screen.
                   </small>
                 </div>
-                {target !== "windows-client" && (
+                {target !== "windows-client" && target !== "compose-local" && (
                   <div
                     className="frontend-selection"
                     role="group"
@@ -666,7 +812,41 @@ function App() {
                     </small>
                   </div>
                 )}
-                {target === "compose-ssh" ? (
+                {target === "compose-local" ? (
+                  <>
+                    <div className="target-note" role="note">
+                      <b>Local trial on this computer</b>
+                      <p>
+                        Scout runs the released ApiaryLens package here through
+                        WSL2 with Docker on Windows (Docker Desktop), or Docker
+                        on Linux. Everything stays on this machine at
+                        http://localhost. Preflight checks that Docker is ready
+                        and tells you what to install if it isn&#39;t. If the
+                        install folder isn&#39;t writable, pick one inside your
+                        home folder, for example /home/you/apiarylens.
+                      </p>
+                    </div>
+                    <Field
+                      label="Install folder (inside WSL on Windows)"
+                      name="localDirectory"
+                      value={form.localDirectory}
+                      update={update}
+                    />
+                    <Field
+                      label="Project name"
+                      name="projectName"
+                      value={form.projectName}
+                      update={update}
+                    />
+                    <Field
+                      label="Local port"
+                      name="localHttpPort"
+                      value={form.localHttpPort}
+                      update={update}
+                      placeholder="8420"
+                    />
+                  </>
+                ) : target === "compose-ssh" ? (
                   <>
                     <Field
                       label="Server address"
@@ -900,18 +1080,20 @@ function App() {
                   <span>
                     {target === "compose-ssh"
                       ? "Your Linux server"
-                      : target === "windows-client"
-                        ? "This Windows account"
-                        : target === "plan-only"
-                          ? "Export only"
-                          : "Your Cloudflare account"}
+                      : target === "compose-local"
+                        ? `This computer only — http://localhost:${Number.parseInt(form.localHttpPort, 10) || 8420}`
+                        : target === "windows-client"
+                          ? "This Windows account"
+                          : target === "plan-only"
+                            ? "Export only"
+                            : "Your Cloudflare account"}
                   </span>
                 </div>
                 <div>
                   <b>Operation</b>
                   <span>{operation}</span>
                 </div>
-                {target !== "windows-client" && (
+                {target !== "windows-client" && target !== "compose-local" && (
                   <div>
                     <b>Deployment content</b>
                     <span>
@@ -1126,11 +1308,12 @@ function App() {
                 </div>
               )}
               <div className="progress-actions">
-                {runFailed && (
-                  <button className="btn" onClick={() => void run("resume")}>
-                    Resume safely
-                  </button>
-                )}
+                {runFailed &&
+                  (lastRunMode === "apply" || lastRunMode === "resume") && (
+                    <button className="btn" onClick={() => void run("resume")}>
+                      Resume safely
+                    </button>
+                  )}
                 <button className="btn" onClick={() => void saveDiagnostics()}>
                   Save sanitized diagnostics
                 </button>
@@ -1151,7 +1334,7 @@ function App() {
                         ? "Backup created and verified"
                         : "The requested work completed"}
                   </h1>
-                  {release && (
+                  {release && healthVerified && (
                     <div className="health-line">
                       <span className="state ok">Verified</span>
                       The deployment reports exactly release{" "}
@@ -1217,11 +1400,11 @@ function App() {
                 </div>
               ) : (
                 <div className="callout muted">
-                  <h3>No connection profile for this operation</h3>
+                  <h3>No connection profile for this setup</h3>
                   <p>
-                    Nothing here needs connecting, so Scout didn’t write one.
-                    Cloud and own-server installs get a secret-free connection
-                    file here to hand to the family’s other devices.
+                    {target === "compose-local"
+                      ? "With everything on one computer there is nothing to connect, so Scout didn’t write one. Cloud and own-server setups get a secret-free connection file here to hand to the family’s other devices."
+                      : "Nothing here needs connecting, so Scout didn’t write one. Cloud and own-server installs get a secret-free connection file here to hand to the family’s other devices."}
                   </p>
                 </div>
               )}

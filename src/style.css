@@ -349,10 +349,10 @@ code,
   margin-top: 2px;
   position: relative;
 }
-.choice.selected .radio {
+.choice.selected > .radio {
   border-color: var(--accent);
 }
-.choice.selected .radio::after {
+.choice.selected > .radio::after {
   content: "";
   position: absolute;
   inset: 3px;
@@ -970,4 +970,103 @@ details.plan-details pre {
     grid-template-columns: 1fr;
     gap: 2px;
   }
+}
+
+/* ---- local-machine compound choice ---- */
+.choice.compound {
+  cursor: default;
+}
+.sub-choices {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.sub-choice {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--dialog);
+  text-align: left;
+  color: var(--ink);
+  width: 100%;
+}
+.sub-choice:hover {
+  border-color: var(--ink-3);
+}
+.sub-choice.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.sub-choice b {
+  font-size: 13.5px;
+  font-weight: 650;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.sub-choice p {
+  grid-column: 2;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  max-width: 60ch;
+}
+.sub-choice .radio.small {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+}
+.sub-choice.selected .radio.small {
+  border-color: var(--accent);
+}
+.sub-choice.selected .radio.small::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.sub-choice.placeholder {
+  cursor: default;
+  border-style: dashed;
+  background: var(--dialog-2);
+}
+.sub-choice.placeholder:hover {
+  border-color: var(--line);
+}
+.sub-choice.placeholder b,
+.sub-choice.placeholder p {
+  color: var(--ink-3);
+}
+.flag.soon {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+/* ---- Scout self-update notice ---- */
+.update-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: var(--dialog-2);
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.update-note p {
+  flex: 1 1 32ch;
+  max-width: 70ch;
+}
+.update-note .btn {
+  padding: 6px 14px;
+  font-size: 12.5px;
 }

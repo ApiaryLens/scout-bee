@@ -40,6 +40,7 @@ func main() {
 	}))
 	executor := newExecutor()
 	mux.HandleFunc("/api/v1/release", authorized(token, executor.releaseHTTP))
+	mux.HandleFunc("/api/v1/scout-update", authorized(token, executor.scoutUpdateHTTP))
 	mux.HandleFunc("/api/v1/execute", authorized(token, executor.executeHTTP))
 	mux.HandleFunc("/api/v1/history", authorized(token, executor.historyHTTP))
 	mux.HandleFunc("/api/v1/operations/", authorized(token, executor.operationHTTP))
