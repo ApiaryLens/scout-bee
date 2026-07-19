@@ -7,6 +7,7 @@ import {
   ownerCodeReady,
   type OwnerCodeMode,
 } from "./owner-code";
+import { resolveLaunchToken } from "./launch-token";
 
 type Operation =
   | "install"
@@ -98,7 +99,20 @@ const railNotes: Record<number, string> = {
   5: "Come back to Scout anytime — to update, back up, restore, or repair.",
 };
 
-const token = location.hash.slice(1);
+// Resolve the launch token from the URL (query param, with legacy #fragment
+// fallback) and persist it so reloads / bare-URL tabs stay authorized. See
+// launch-token.ts for why this matters on Windows.
+const token = resolveLaunchToken(
+  location.search,
+  location.hash,
+  (() => {
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  })(),
+);
 // Owner UAT finding (2026-07-19): a lost loopback backend must never surface
 // as a raw fetch error. Every Scout API call is loopback-only, so a network
 // failure means Scout's own local process is gone.

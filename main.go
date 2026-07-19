@@ -47,8 +47,12 @@ func main() {
 	mux.HandleFunc("/api/v1/operations/", authorized(token, executor.operationHTTP))
 	mux.HandleFunc("/api/v1/diagnostics/", authorized(token, executor.diagnosticsHTTP))
 	mux.Handle("/", securityHeaders(http.FileServer(http.FS(assets))))
-	url := fmt.Sprintf("http://%s/#%s", listener.Addr(), token)
-	fmt.Printf("Scout Bee is ready at %s\n", strings.Split(url, "#")[0])
+	// Deliver the launch token as a query parameter, not a URL fragment: the
+	// Windows opener (rundll32 FileProtocolHandler) drops everything after "#",
+	// which left the wizard tokenless and stuck on "launch authorization is
+	// required". Query params survive the OS URL handlers on every platform.
+	url := fmt.Sprintf("http://%s/?k=%s", listener.Addr(), token)
+	fmt.Printf("Scout Bee is ready at %s\n", strings.Split(url, "?")[0])
 	openBrowser(url)
 	server := &http.Server{
 		Handler:           mux,
