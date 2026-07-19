@@ -45,6 +45,64 @@ func TestValidateLocalComposePlan(t *testing.T) {
 	}
 }
 
+func TestLocalTrialAcceptsHomeRelativeInstallFolder(t *testing.T) {
+	p := validLocalPlan()
+	p.LocalCompose.InstallDirectory = "~/apiarylens"
+	if err := validate(p); err != nil {
+		t.Fatalf("the home-relative default folder must validate: %v", err)
+	}
+	for _, bad := range []string{"~", "~/", "~/../etc", "~/apiarylens/"} {
+		p.LocalCompose.InstallDirectory = bad
+		if err := validate(p); err == nil {
+			t.Fatalf("%q must be rejected", bad)
+		}
+	}
+	ssh := validPlan()
+	ssh.Target = "compose-ssh"
+	ssh.Cloudflare = nil
+	ssh.Compose = &compose{
+		Host: "hives.example", Port: 22, User: "beekeeper", PublicURL: "https://hives.example",
+		TargetDirectory: "~/apiarylens", ProjectName: "apiarylens-family",
+		SSHHostKeySha256: "SHA256:abc", BackupRetention: 14,
+	}
+	if err := validate(ssh); err == nil {
+		t.Fatal("compose-ssh must keep absolute-only install folders")
+	}
+}
+
+func TestLifecycleScriptsExpandHomeRelativeTarget(t *testing.T) {
+	for _, script := range []string{composeRemoteScript, composeTargetPreflightScript} {
+		if !strings.Contains(script, `case "$target" in "~/"*) target="${HOME}${target#\~}" ;; esac`) {
+			t.Fatal("lifecycle scripts must expand a home-relative install folder to $HOME")
+		}
+	}
+}
+
+func TestLocalFolderCheckEndpointReportsWritability(t *testing.T) {
+	post := func(e *executor, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/local/folder-check", strings.NewReader(body))
+		response := httptest.NewRecorder()
+		e.localFolderCheckHTTP(response, request)
+		return response
+	}
+	writable := post(&executor{runner: &localLifecycleRunner{}}, `{"directory":"~/apiarylens"}`)
+	if writable.Code != http.StatusOK || !strings.Contains(writable.Body.String(), `"writable":true`) {
+		t.Fatalf("expected a writable folder verdict, got %d %s", writable.Code, writable.Body.String())
+	}
+	unwritable := post(&executor{runner: &composePreflightRunner{failFolderTest: true}}, `{"directory":"/opt/apiarylens"}`)
+	if unwritable.Code != http.StatusOK || !strings.Contains(unwritable.Body.String(), `"writable":false`) {
+		t.Fatalf("expected an unwritable folder verdict, got %d %s", unwritable.Code, unwritable.Body.String())
+	}
+	unsafe := post(&executor{runner: &localLifecycleRunner{}}, `{"directory":"/opt/../etc"}`)
+	if unsafe.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe folders must be refused, got %d", unsafe.Code)
+	}
+	noShell := post(&executor{runner: missingShellRunner{}}, `{"directory":"~/apiarylens"}`)
+	if noShell.Code != http.StatusOK || !strings.Contains(noShell.Body.String(), `"checked":false`) {
+		t.Fatalf("a missing local shell must report checked=false, got %d %s", noShell.Code, noShell.Body.String())
+	}
+}
+
 type missingShellRunner struct{}
 
 func (missingShellRunner) Find(string) error { return errors.New("not found") }

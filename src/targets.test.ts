@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { availableTargets, targetCatalog } from "./targets";
+import { availableTargets, setupDefaults, targetCatalog } from "./targets";
 
 describe("windows_client feature flag (WIN-031)", () => {
   it("hides the Windows client target when the flag is off (the default)", () => {
@@ -45,5 +45,23 @@ describe("owner wording rules (2026-07-19)", () => {
     expect(local?.description).toContain("this computer");
     expect(local?.description).toContain("backup");
     expect(local?.description.toLowerCase()).not.toContain("sync");
+  });
+});
+
+describe("per-setup install-folder defaults (owner UAT 2026-07-19)", () => {
+  it("defaults the local trial to a sudo-free home folder, never /opt", () => {
+    expect(
+      setupDefaults["compose-local"].installDirectory.startsWith("~/"),
+    ).toBe(true);
+    expect(setupDefaults["compose-local"].installDirectory).not.toContain(
+      "/opt",
+    );
+    expect(setupDefaults["compose-local"].httpPort).toBeGreaterThan(1024);
+  });
+
+  it("keeps /opt for server installs where root access is expected", () => {
+    expect(setupDefaults["compose-ssh"].targetDirectory).toBe(
+      "/opt/apiarylens",
+    );
   });
 });

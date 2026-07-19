@@ -260,8 +260,7 @@ func validate(p plan) error {
 		if !resourceName.MatchString(p.LocalCompose.ProjectName) {
 			return errors.New("the local trial project name contains unsupported characters")
 		}
-		if !remotePath.MatchString(p.LocalCompose.InstallDirectory) || strings.Contains(p.LocalCompose.InstallDirectory, "..") ||
-			p.LocalCompose.InstallDirectory == "/" || path.Clean(p.LocalCompose.InstallDirectory) != p.LocalCompose.InstallDirectory {
+		if !safeLocalTrialDirectory(p.LocalCompose.InstallDirectory) {
 			return errors.New("the local trial install folder is unsafe")
 		}
 		if p.LocalCompose.HTTPPort < 1 || p.LocalCompose.HTTPPort > 65535 {
@@ -281,6 +280,20 @@ func validate(p plan) error {
 		return errors.New("the deployment target is unsupported")
 	}
 	return nil
+}
+
+// safeLocalTrialDirectory accepts an absolute POSIX path or a home-relative
+// "~/..." path. The local trial defaults to a home-relative folder because a
+// normal WSL/Linux user cannot create /opt/... without sudo (owner UAT
+// 2026-07-19); the lifecycle script expands "~" to $HOME inside the shell,
+// so the right home is always resolved for the executing user.
+func safeLocalTrialDirectory(value string) bool {
+	candidate := value
+	if strings.HasPrefix(candidate, "~/") {
+		candidate = candidate[1:]
+	}
+	return remotePath.MatchString(candidate) && !strings.Contains(candidate, "..") &&
+		candidate != "/" && path.Clean(candidate) == candidate
 }
 
 func safeHTTPSURL(value string) bool {

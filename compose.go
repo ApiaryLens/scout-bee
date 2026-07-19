@@ -312,6 +312,7 @@ decode() {
 }
 operation=$1
 target=$(decode "$2")
+case "$target" in "~/"*) target="${HOME}${target#\~}" ;; esac
 project=$(decode "$3")
 public_url=$(decode "$4")
 version=$(decode "$5")
@@ -458,6 +459,7 @@ decode() {
   printf '%s' "$encoded" | base64 -d
 }
 target=$(decode "$1")
+case "$target" in "~/"*) target="${HOME}${target#\~}" ;; esac
 if [ -e "$target" ] || [ -L "$target" ]; then
   [ ! -L "$target" ] && [ -d "$target" ] && [ -w "$target" ]
   [ "$(stat -c '%u' "$target")" = "$(id -u)" ]

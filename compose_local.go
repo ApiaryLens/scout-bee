@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // localComposeAdapter runs the released Compose bundle on this computer for
@@ -81,6 +84,36 @@ func (a *localComposeAdapter) preflight(ctx context.Context, input request) ([]p
 		pass("Verify local-only exposure", fmt.Sprintf("The trial serves plain HTTP at http://localhost:%d on this computer only; nothing is published to the network and no connected options are offered.", input.Plan.LocalCompose.HTTPPort)),
 	)
 	return phases, nil
+}
+
+// localFolderCheckHTTP lets the Details step probe writability of the local
+// trial install folder where it is typed, instead of only failing two steps
+// later during preflight (owner UAT 2026-07-19). The probe runs the same
+// script preflight uses; checked=false means no local shell exists to ask.
+func (e *executor) localFolderCheckHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]string{"message": "Method not allowed"})
+		return
+	}
+	var input struct {
+		Directory string `json:"directory"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil || !safeLocalTrialDirectory(input.Directory) {
+		jsonResponse(w, http.StatusBadRequest, map[string]string{"message": "The folder path is unsafe"})
+		return
+	}
+	if err := e.runner.Find(localShellName()); err != nil {
+		jsonResponse(w, http.StatusOK, map[string]any{"checked": false})
+		return
+	}
+	probe := localShellCommand("sh", "-s", "--", base64.RawURLEncoding.EncodeToString([]byte(input.Directory)))
+	probe.Stdin = []byte(composeTargetPreflightScript)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	_, err := e.runner.Run(ctx, probe, nil)
+	jsonResponse(w, http.StatusOK, map[string]any{"checked": true, "writable": err == nil})
 }
 
 // localShellPath translates a host path into the local shell's view of the

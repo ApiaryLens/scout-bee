@@ -1098,3 +1098,35 @@ details.plan-details pre {
   font-weight: 500;
   color: var(--warn);
 }
+
+/* ---- owner setup code (owner decision 2026-07-19) ---- */
+.owner-code-value {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.owner-code-value code {
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  background: var(--dialog-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.owner-code-note {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.owner-code details.adv summary {
+  padding: 8px 12px;
+  font-size: 12.5px;
+}
+.owner-code details.adv .adv-body {
+  padding: 10px 12px;
+}
+.field-ok {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--good);
+}

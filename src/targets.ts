@@ -66,6 +66,15 @@ export const targetCatalog: readonly TargetDefinition[] = [
   },
 ] as const;
 
+// Per-setup default folders (owner UAT 2026-07-19): the local trial defaults
+// to a home-relative folder because a normal WSL/Linux user cannot create
+// /opt/... without sudo; server installs keep /opt where root access is an
+// expected part of running a server.
+export const setupDefaults = {
+  "compose-local": { installDirectory: "~/apiarylens", httpPort: 8420 },
+  "compose-ssh": { targetDirectory: "/opt/apiarylens" },
+} as const;
+
 export function availableTargets(
   windowsClientEnabled: boolean,
 ): TargetDefinition[] {
